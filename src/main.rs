@@ -10,13 +10,14 @@
 //! sync as files are added or removed.
 
 mod assets;
+mod auth;
 mod base64;
 mod catalog;
 mod epub;
 mod model;
 mod watch;
 
-use std::path::PathBuf;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use axum::{
@@ -29,8 +30,12 @@ use axum::{
 };
 use serde::Deserialize;
 
+use crate::auth::AuthStore;
 use crate::catalog::{Book, BookSource, Catalog, Category};
 use crate::model::*;
+
+/// The HTTP Basic realm advertised to clients.
+const AUTH_REALM: &str = "OPDS catalog";
 
 /// Shared application state.
 struct AppState {
@@ -38,15 +43,8 @@ struct AppState {
     base_url: String,
     /// The current catalog, hot-swapped by the file watcher on changes.
     catalog: RwLock<Arc<Catalog>>,
-    /// HTTP Basic credentials protecting the catalog, if configured.
-    auth: Option<BasicAuth>,
-}
-
-/// A single set of HTTP Basic credentials guarding the catalog.
-struct BasicAuth {
-    user: String,
-    pass: String,
-    realm: String,
+    /// The user store protecting the catalog, if configured.
+    auth: Option<Arc<AuthStore>>,
 }
 
 impl AppState {
@@ -64,6 +62,16 @@ async fn main() {
                 .unwrap_or_else(|_| "opds_axum=debug,tower_http=debug,info".into()),
         )
         .init();
+
+    // `opds-axum adduser <username> [password]` manages accounts and exits.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("adduser") {
+        if let Err(err) = cmd_adduser(&args[2..]) {
+            eprintln!("adduser: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     let base_url =
         std::env::var("OPDS_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
@@ -87,18 +95,26 @@ async fn main() {
         }
     };
 
-    // Optional HTTP Basic protection, configured as OPDS_AUTH="user:pass".
-    let auth = std::env::var("OPDS_AUTH")
+    // Setting OPDS_AUTH_DB to a SQLite path enables HTTP Basic auth backed by
+    // that user database. A configured-but-unreadable database is fatal, so we
+    // never accidentally serve an intended-private catalog unprotected.
+    let auth = std::env::var("OPDS_AUTH_DB")
         .ok()
         .filter(|s| !s.is_empty())
-        .and_then(|spec| {
-            let (user, pass) = spec.split_once(':')?;
-            tracing::info!("HTTP Basic auth enabled for the catalog");
-            Some(BasicAuth {
-                user: user.to_string(),
-                pass: pass.to_string(),
-                realm: "OPDS catalog".to_string(),
-            })
+        .map(|path| match AuthStore::open(FsPath::new(&path)) {
+            Ok(store) => {
+                if store.user_count() == 0 {
+                    tracing::warn!(
+                        "auth enabled but no users exist; add one with `adduser`"
+                    );
+                }
+                tracing::info!(db = %path, "HTTP Basic auth enabled");
+                Arc::new(store)
+            }
+            Err(err) => {
+                eprintln!("failed to open OPDS_AUTH_DB ({path}): {err}");
+                std::process::exit(1);
+            }
         });
 
     let state = Arc::new(AppState {
@@ -116,6 +132,45 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     tracing::info!("OPDS server listening on http://{addr}/opds");
     axum::serve(listener, app(state)).await.unwrap();
+}
+
+/// The path to the user database, from `OPDS_AUTH_DB` or a default in the CWD.
+fn auth_db_path() -> PathBuf {
+    std::env::var_os("OPDS_AUTH_DB")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("opds-auth.db"))
+}
+
+/// `adduser <username> [password]` — create or update an account. When no
+/// password argument is given, one is read from stdin.
+fn cmd_adduser(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let username = args
+        .first()
+        .ok_or("usage: opds-axum adduser <username> [password]")?;
+
+    let password = match args.get(1) {
+        Some(password) => password.clone(),
+        None => prompt_password()?,
+    };
+    if password.is_empty() {
+        return Err("password must not be empty".into());
+    }
+
+    let db_path = auth_db_path();
+    let store = AuthStore::open(&db_path)?;
+    store.add_user(username, &password, None)?;
+    println!("user '{username}' saved to {}", db_path.display());
+    Ok(())
+}
+
+/// Read a password from stdin (kept out of argv/shell history). Not hidden.
+fn prompt_password() -> std::io::Result<String> {
+    use std::io::{BufRead, Write};
+    eprint!("Password: ");
+    std::io::stderr().flush()?;
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    Ok(line.trim_end_matches(['\n', '\r']).to_string())
 }
 
 /// Build the application router. Kept separate from `main` so tests can drive
@@ -154,41 +209,45 @@ async fn require_auth(
     request: Request,
     next: Next,
 ) -> Response {
-    let Some(auth) = &state.auth else {
+    let Some(store) = state.auth.clone() else {
         return next.run(request).await;
     };
-    if credentials_ok(request.headers(), auth) {
+
+    // Verifying involves a SQLite lookup and a (deliberately slow) Argon2 hash,
+    // so run it off the async runtime.
+    let authorized = match extract_basic(request.headers()) {
+        Some((user, pass)) => tokio::task::spawn_blocking(move || store.verify(&user, &pass))
+            .await
+            .unwrap_or(false),
+        None => false,
+    };
+
+    if authorized {
         next.run(request).await
     } else {
-        unauthorized(&state, auth)
+        unauthorized(&state)
     }
 }
 
-/// Check an `Authorization: Basic ...` header against the configured credentials.
-fn credentials_ok(headers: &HeaderMap, auth: &BasicAuth) -> bool {
-    let Some(encoded) = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Basic "))
-    else {
-        return false;
-    };
-    let Some(decoded) = base64::decode(encoded.trim()).and_then(|b| String::from_utf8(b).ok())
-    else {
-        return false;
-    };
-    match decoded.split_once(':') {
-        Some((user, pass)) => user == auth.user && pass == auth.pass,
-        None => false,
-    }
+/// Extract the username and password from an `Authorization: Basic ...` header.
+fn extract_basic(headers: &HeaderMap) -> Option<(String, String)> {
+    let encoded = headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Basic ")?;
+    let decoded = base64::decode(encoded.trim())?;
+    let text = String::from_utf8(decoded).ok()?;
+    let (user, pass) = text.split_once(':')?;
+    Some((user.to_string(), pass.to_string()))
 }
 
 /// Build the Authentication for OPDS document describing how to log in.
-fn auth_document_body(state: &AppState, auth: &BasicAuth) -> AuthenticationDocument {
+fn auth_document_body(state: &AppState) -> AuthenticationDocument {
     let base = &state.base_url;
     AuthenticationDocument {
         id: format!("{base}/opds/auth"),
-        title: auth.realm.clone(),
+        title: AUTH_REALM.to_string(),
         authentication: vec![AuthenticationFlow {
             type_: "http://opds-spec.org/auth/basic".to_string(),
             labels: Some(AuthLabels {
@@ -205,14 +264,14 @@ fn auth_document_body(state: &AppState, auth: &BasicAuth) -> AuthenticationDocum
 }
 
 /// The 401 challenge response, with the auth document as its body.
-fn unauthorized(state: &AppState, auth: &BasicAuth) -> Response {
-    let body = serde_json::to_vec(&auth_document_body(state, auth)).unwrap_or_default();
+fn unauthorized(state: &AppState) -> Response {
+    let body = serde_json::to_vec(&auth_document_body(state)).unwrap_or_default();
     (
         StatusCode::UNAUTHORIZED,
         [
             (
                 header::WWW_AUTHENTICATE,
-                format!("Basic realm=\"{}\"", auth.realm),
+                format!("Basic realm=\"{AUTH_REALM}\""),
             ),
             (header::CONTENT_TYPE, AUTH_MEDIA_TYPE.to_string()),
         ],
@@ -223,12 +282,11 @@ fn unauthorized(state: &AppState, auth: &BasicAuth) -> Response {
 
 /// Serve the Authentication for OPDS document (only meaningful when auth is on).
 async fn auth_document(State(state): State<Arc<AppState>>) -> Response {
-    match &state.auth {
-        Some(auth) => {
-            let body = serde_json::to_vec(&auth_document_body(&state, auth)).unwrap_or_default();
-            ([(header::CONTENT_TYPE, AUTH_MEDIA_TYPE)], body).into_response()
-        }
-        None => not_found("Authentication is not enabled"),
+    if state.auth.is_some() {
+        let body = serde_json::to_vec(&auth_document_body(&state)).unwrap_or_default();
+        ([(header::CONTENT_TYPE, AUTH_MEDIA_TYPE)], body).into_response()
+    } else {
+        not_found("Authentication is not enabled")
     }
 }
 
@@ -747,14 +805,12 @@ mod tests {
     }
 
     fn test_app_with_auth() -> Router {
+        let store = auth::AuthStore::open_in_memory().unwrap();
+        store.add_user("admin", "secret", None).unwrap();
         app(Arc::new(AppState {
             base_url: BASE.to_string(),
             catalog: RwLock::new(Arc::new(Catalog::sample())),
-            auth: Some(BasicAuth {
-                user: "admin".to_string(),
-                pass: "secret".to_string(),
-                realm: "Test".to_string(),
-            }),
+            auth: Some(Arc::new(store)),
         }))
     }
 
@@ -1154,6 +1210,23 @@ mod tests {
 
         // Non-image bytes yield no thumbnail (caller falls back).
         assert!(assets::thumbnail(b"not an image", 160, 240).is_none());
+    }
+
+    #[test]
+    fn auth_store_hashes_and_verifies() {
+        let store = auth::AuthStore::open_in_memory().unwrap();
+        store.add_user("alice", "correct horse", Some("Alice")).unwrap();
+
+        assert_eq!(store.user_count(), 1);
+        assert!(store.verify("alice", "correct horse"));
+        assert!(!store.verify("alice", "wrong password"));
+        assert!(!store.verify("nobody", "correct horse"));
+
+        // add_user upserts: the password can be changed in place.
+        store.add_user("alice", "new passphrase", None).unwrap();
+        assert_eq!(store.user_count(), 1);
+        assert!(store.verify("alice", "new passphrase"));
+        assert!(!store.verify("alice", "correct horse"));
     }
 
     #[test]

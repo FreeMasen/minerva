@@ -17,8 +17,9 @@ cargo run
 OPDS_BASE_URL=https://books.example.com cargo run
 # serve a real library: scan a directory of EPUB files instead of the samples
 OPDS_LIBRARY_DIR=/path/to/epubs cargo run
-# protect the catalog with HTTP Basic auth
-OPDS_AUTH=user:pass cargo run
+# protect the catalog with HTTP Basic auth backed by a SQLite user database
+OPDS_AUTH_DB=opds-auth.db cargo run adduser alice   # prompts for a password
+OPDS_AUTH_DB=opds-auth.db cargo run                 # now the catalog requires login
 ```
 
 The server listens on `0.0.0.0:3000`. Visit http://localhost:3000/opds.
@@ -74,10 +75,12 @@ when a book has no cover).
   endpoint supporting a general query plus per-field author/title filters.
 - Pagination on the acquisition feed: `numberOfItems`/`itemsPerPage`/`currentPage`
   metadata plus `first`/`previous`/`next`/`last` links.
-- Optional HTTP Basic authentication (`OPDS_AUTH=user:pass`) with an
-  Authentication for OPDS document: protected resources answer 401 with an
-  `application/opds-authentication+json` challenge, and the document is also
-  served (unprotected) at `/opds/auth`.
+- Optional multi-account HTTP Basic authentication backed by a SQLite user
+  database (`OPDS_AUTH_DB`), with Argon2-hashed passwords and constant-time
+  verification (RustCrypto). Manage accounts with the `adduser` subcommand.
+  Protected resources answer 401 with an Authentication for OPDS document
+  (`application/opds-authentication+json`), also served (unprotected) at
+  `/opds/auth`.
 - Correct OPDS media types on every response.
 
 ## Tests
@@ -102,4 +105,5 @@ removal.
   cover fallbacks).
 - `src/watch.rs` — watches the library directory and hot-swaps the catalog.
 - `src/base64.rs` — minimal Base64 for HTTP Basic credentials.
+- `src/auth.rs` — the SQLite-backed user store and Argon2 password hashing.
 - `src/main.rs` — the Axum router, handlers, auth middleware, and response wrapper.
