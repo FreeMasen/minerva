@@ -507,9 +507,22 @@ async fn serve_cover(state: Arc<AppState>, id: String, thumbnail: bool) -> Respo
         let path = path.clone();
         let zip_path = cover.zip_path.clone();
         let media_type = cover.media_type.clone();
-        match tokio::task::spawn_blocking(move || epub::read_entry(&path, &zip_path)).await {
-            Ok(Ok(bytes)) => {
-                return ([(header::CONTENT_TYPE, media_type)], bytes).into_response();
+        // Read the embedded cover (and, for a thumbnail, downscale it) off the
+        // async runtime — both zip reads and image decoding are blocking.
+        let read = tokio::task::spawn_blocking(move || {
+            let bytes = epub::read_entry(&path, &zip_path)?;
+            if thumbnail {
+                if let Some(thumb) = assets::thumbnail(&bytes, 160, 240) {
+                    return Ok((thumb, "image/jpeg".to_string()));
+                }
+            }
+            Ok::<_, std::io::Error>((bytes, media_type))
+        })
+        .await;
+
+        match read {
+            Ok(Ok((bytes, content_type))) => {
+                return ([(header::CONTENT_TYPE, content_type)], bytes).into_response();
             }
             Ok(Err(err)) => {
                 tracing::warn!(%err, id, "failed to read embedded cover; using placeholder");
@@ -925,6 +938,25 @@ mod tests {
         assert!(scanned.books().is_empty());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn thumbnail_downscales_and_reencodes_as_jpeg() {
+        // A 400x600 solid PNG (2:3 aspect, same as the 160x240 thumbnail box).
+        let source = image::RgbImage::from_pixel(400, 600, image::Rgb([200, 30, 30]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(source)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+
+        let thumb = assets::thumbnail(png.get_ref(), 160, 240).expect("a thumbnail");
+        // Valid JPEG, downscaled, aspect ratio preserved.
+        assert_eq!(&thumb[..3], b"\xff\xd8\xff");
+        let decoded = image::load_from_memory(&thumb).expect("decodable");
+        assert_eq!((decoded.width(), decoded.height()), (160, 240));
+
+        // Non-image bytes yield no thumbnail (caller falls back).
+        assert!(assets::thumbnail(b"not an image", 160, 240).is_none());
     }
 
     // Books in Fiction/ and Non-Fiction/ subfolders are found recursively and

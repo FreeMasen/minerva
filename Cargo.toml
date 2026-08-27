@@ -12,6 +12,7 @@ tower-http = { version = "0.6", features = ["trace"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 roxmltree = "0.20"
 notify = "6"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

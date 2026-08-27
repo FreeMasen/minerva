@@ -63,7 +63,8 @@ when a book has no cover).
   obtained after the (HTML) purchase page — both backed by working endpoints.
   Downloads stream real EPUB bytes (or a generated minimal EPUB 3 for samples).
 - Cover `images` (full-size + thumbnail), served from the EPUB's embedded cover
-  or as a generated SVG placeholder.
+  (thumbnails are downscaled to fit 160x240 and re-encoded as JPEG) or as a
+  generated SVG placeholder.
 - A templated `search` link (`search{?query,author,title}`) and a search
   endpoint supporting a general query plus per-field author/title filters.
 - Pagination on the acquisition feed: `numberOfItems`/`itemsPerPage`/`currentPage`

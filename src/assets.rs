@@ -157,3 +157,14 @@ pub fn cover_svg(book: &Book, width: u32, height: u32) -> String {
         author_size = height / 26,
     )
 }
+
+/// Downscale a raster cover image to fit within `width`x`height`, preserving
+/// aspect ratio, and re-encode it as JPEG. Returns `None` if the bytes can't be
+/// decoded (in which case callers serve the original image instead).
+pub fn thumbnail(bytes: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+    let image = image::load_from_memory(bytes).ok()?;
+    let thumb = image.thumbnail(width, height);
+    let mut out = Cursor::new(Vec::new());
+    thumb.write_to(&mut out, image::ImageFormat::Jpeg).ok()?;
+    Some(out.into_inner())
+}
