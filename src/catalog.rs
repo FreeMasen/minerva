@@ -129,10 +129,10 @@ impl Book {
 
         // Acquisition link: a free download, or a paid "buy" link with a price.
         let acquisition = match self.price_usd {
-            None => Link::new(format!("{base}/download/{}.epub", self.id))
+            None => Link::new(format!("{base}/opds/download/{}.epub", self.id))
                 .with_rel("http://opds-spec.org/acquisition/open-access")
                 .with_type("application/epub+zip"),
-            Some(price) => Link::new(format!("{base}/buy/{}", self.id))
+            Some(price) => Link::new(format!("{base}/opds/buy/{}", self.id))
                 .with_rel("http://opds-spec.org/acquisition/buy")
                 .with_type("application/epub+zip")
                 .with_properties(LinkProperties {
@@ -144,14 +144,14 @@ impl Book {
                 }),
         };
 
-        let cover = Link::new(format!("{base}/covers/{}.jpg", self.id))
+        let cover = Link::new(format!("{base}/opds/covers/{}.svg", self.id))
             .with_rel("http://opds-spec.org/image")
-            .with_type("image/jpeg")
+            .with_type("image/svg+xml")
             .with_dimensions(800, 1200);
 
-        let thumbnail = Link::new(format!("{base}/covers/{}-thumb.jpg", self.id))
+        let thumbnail = Link::new(format!("{base}/opds/covers/{}-thumb.svg", self.id))
             .with_rel("http://opds-spec.org/image/thumbnail")
-            .with_type("image/jpeg")
+            .with_type("image/svg+xml")
             .with_dimensions(160, 240);
 
         Publication {
