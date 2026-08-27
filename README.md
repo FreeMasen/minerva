@@ -17,6 +17,8 @@ cargo run
 OPDS_BASE_URL=https://books.example.com cargo run
 # serve a real library: scan a directory of EPUB files instead of the samples
 OPDS_LIBRARY_DIR=/path/to/epubs cargo run
+# protect the catalog with HTTP Basic auth
+OPDS_AUTH=user:pass cargo run
 ```
 
 The server listens on `0.0.0.0:3000`. Visit http://localhost:3000/opds.
@@ -48,6 +50,7 @@ when a book has no cover).
 | `GET /opds/buy/{id}`           | Advertised for spec completeness; returns 501 (no store).|
 | `GET /opds/borrow/{id}`        | Advertised for lendable titles; returns 501 (no lending).|
 | `GET /opds/covers/{id}.svg`    | Generated SVG cover (`{id}-thumb.svg` for the thumbnail).|
+| `GET /opds/auth`               | Authentication document (when `OPDS_AUTH` is set).      |
 
 ## What's implemented
 
@@ -71,6 +74,10 @@ when a book has no cover).
   endpoint supporting a general query plus per-field author/title filters.
 - Pagination on the acquisition feed: `numberOfItems`/`itemsPerPage`/`currentPage`
   metadata plus `first`/`previous`/`next`/`last` links.
+- Optional HTTP Basic authentication (`OPDS_AUTH=user:pass`) with an
+  Authentication for OPDS document: protected resources answer 401 with an
+  `application/opds-authentication+json` challenge, and the document is also
+  served (unprotected) at `/opds/auth`.
 - Correct OPDS media types on every response.
 
 ## Tests
@@ -94,4 +101,5 @@ removal.
 - `src/assets.rs` — on-the-fly EPUB and SVG cover generation (for samples and
   cover fallbacks).
 - `src/watch.rs` — watches the library directory and hot-swaps the catalog.
-- `src/main.rs` — the Axum router, handlers, and response wrapper.
+- `src/base64.rs` — minimal Base64 for HTTP Basic credentials.
+- `src/main.rs` — the Axum router, handlers, auth middleware, and response wrapper.

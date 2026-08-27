@@ -12,6 +12,39 @@ use serde::Serialize;
 pub const FEED_MEDIA_TYPE: &str = "application/opds+json";
 /// Media type for a single OPDS publication.
 pub const PUBLICATION_MEDIA_TYPE: &str = "application/opds-publication+json";
+/// Media type for an Authentication for OPDS document.
+pub const AUTH_MEDIA_TYPE: &str = "application/opds-authentication+json";
+
+/// An Authentication for OPDS document, describing how a client may
+/// authenticate. Returned with 401 from protected resources and served
+/// directly at a discoverable URL.
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthenticationDocument {
+    pub id: String,
+    pub title: String,
+    pub authentication: Vec<AuthenticationFlow>,
+
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Link>,
+}
+
+/// A single supported authentication flow.
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthenticationFlow {
+    /// The flow type URI, e.g. `http://opds-spec.org/auth/basic`.
+    #[serde(rename = "type")]
+    pub type_: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<AuthLabels>,
+}
+
+/// Human-facing labels for credential prompts.
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthLabels {
+    pub login: String,
+    pub password: String,
+}
 
 /// A top-level OPDS feed (a Readium collection acting as a catalog).
 ///

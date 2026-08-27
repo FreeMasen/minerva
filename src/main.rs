@@ -10,6 +10,7 @@
 //! sync as files are added or removed.
 
 mod assets;
+mod base64;
 mod catalog;
 mod epub;
 mod model;
@@ -20,8 +21,9 @@ use std::sync::{Arc, RwLock};
 
 use axum::{
     Router,
-    extract::{Path, Query, State},
-    http::{StatusCode, header},
+    extract::{Path, Query, Request, State},
+    http::{HeaderMap, StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -36,6 +38,15 @@ struct AppState {
     base_url: String,
     /// The current catalog, hot-swapped by the file watcher on changes.
     catalog: RwLock<Arc<Catalog>>,
+    /// HTTP Basic credentials protecting the catalog, if configured.
+    auth: Option<BasicAuth>,
+}
+
+/// A single set of HTTP Basic credentials guarding the catalog.
+struct BasicAuth {
+    user: String,
+    pass: String,
+    realm: String,
 }
 
 impl AppState {
@@ -76,9 +87,24 @@ async fn main() {
         }
     };
 
+    // Optional HTTP Basic protection, configured as OPDS_AUTH="user:pass".
+    let auth = std::env::var("OPDS_AUTH")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .and_then(|spec| {
+            let (user, pass) = spec.split_once(':')?;
+            tracing::info!("HTTP Basic auth enabled for the catalog");
+            Some(BasicAuth {
+                user: user.to_string(),
+                pass: pass.to_string(),
+                realm: "OPDS catalog".to_string(),
+            })
+        });
+
     let state = Arc::new(AppState {
         base_url,
         catalog: RwLock::new(Arc::new(catalog)),
+        auth,
     });
 
     // Reflect additions/removals in the library directory as they happen.
@@ -95,8 +121,8 @@ async fn main() {
 /// Build the application router. Kept separate from `main` so tests can drive
 /// the fully-wired app without binding a socket.
 fn app(state: Arc<AppState>) -> Router {
-    Router::new()
-        .route("/", get(root_redirect))
+    // Catalog routes sit behind the (optional) auth middleware.
+    let protected = Router::new()
         .route("/opds", get(root_feed))
         .route("/opds/all", get(all_publications))
         .route("/opds/category/{slug}", get(category_feed))
@@ -107,8 +133,103 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/opds/borrow/{id}", get(borrow))
         .route("/opds/covers/{id}", get(cover))
         .route("/opds/covers/{id}/thumb", get(cover_thumb))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
+
+    // The redirect and the authentication document must stay reachable
+    // without credentials (the latter is how clients learn how to log in).
+    let public = Router::new()
+        .route("/", get(root_redirect))
+        .route("/opds/auth", get(auth_document));
+
+    public
+        .merge(protected)
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state)
+}
+
+/// Middleware that enforces HTTP Basic auth when it is configured. A missing or
+/// wrong credential yields a 401 carrying an Authentication for OPDS document.
+async fn require_auth(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let Some(auth) = &state.auth else {
+        return next.run(request).await;
+    };
+    if credentials_ok(request.headers(), auth) {
+        next.run(request).await
+    } else {
+        unauthorized(&state, auth)
+    }
+}
+
+/// Check an `Authorization: Basic ...` header against the configured credentials.
+fn credentials_ok(headers: &HeaderMap, auth: &BasicAuth) -> bool {
+    let Some(encoded) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Basic "))
+    else {
+        return false;
+    };
+    let Some(decoded) = base64::decode(encoded.trim()).and_then(|b| String::from_utf8(b).ok())
+    else {
+        return false;
+    };
+    match decoded.split_once(':') {
+        Some((user, pass)) => user == auth.user && pass == auth.pass,
+        None => false,
+    }
+}
+
+/// Build the Authentication for OPDS document describing how to log in.
+fn auth_document_body(state: &AppState, auth: &BasicAuth) -> AuthenticationDocument {
+    let base = &state.base_url;
+    AuthenticationDocument {
+        id: format!("{base}/opds/auth"),
+        title: auth.realm.clone(),
+        authentication: vec![AuthenticationFlow {
+            type_: "http://opds-spec.org/auth/basic".to_string(),
+            labels: Some(AuthLabels {
+                login: "Username".to_string(),
+                password: "Password".to_string(),
+            }),
+        }],
+        links: vec![
+            Link::new(format!("{base}/opds"))
+                .with_rel("start")
+                .with_type(FEED_MEDIA_TYPE),
+        ],
+    }
+}
+
+/// The 401 challenge response, with the auth document as its body.
+fn unauthorized(state: &AppState, auth: &BasicAuth) -> Response {
+    let body = serde_json::to_vec(&auth_document_body(state, auth)).unwrap_or_default();
+    (
+        StatusCode::UNAUTHORIZED,
+        [
+            (
+                header::WWW_AUTHENTICATE,
+                format!("Basic realm=\"{}\"", auth.realm),
+            ),
+            (header::CONTENT_TYPE, AUTH_MEDIA_TYPE.to_string()),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+/// Serve the Authentication for OPDS document (only meaningful when auth is on).
+async fn auth_document(State(state): State<Arc<AppState>>) -> Response {
+    match &state.auth {
+        Some(auth) => {
+            let body = serde_json::to_vec(&auth_document_body(&state, auth)).unwrap_or_default();
+            ([(header::CONTENT_TYPE, AUTH_MEDIA_TYPE)], body).into_response()
+        }
+        None => not_found("Authentication is not enabled"),
+    }
 }
 
 /// Number of publications served per page in acquisition feeds.
@@ -179,6 +300,14 @@ async fn root_feed(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
     feed.metadata.description =
         Some("A sample catalog demonstrating OPDS 2.0 over Axum.".to_string());
+
+    if state.auth.is_some() {
+        feed = feed.with_link(
+            Link::new(format!("{base}/opds/auth"))
+                .with_rel("http://opds-spec.org/auth/document")
+                .with_type(AUTH_MEDIA_TYPE),
+        );
+    }
 
     feed.navigation = vec![
         Link::new(format!("{base}/opds/all"))
@@ -613,6 +742,19 @@ mod tests {
         app(Arc::new(AppState {
             base_url: BASE.to_string(),
             catalog: RwLock::new(Arc::new(Catalog::sample())),
+            auth: None,
+        }))
+    }
+
+    fn test_app_with_auth() -> Router {
+        app(Arc::new(AppState {
+            base_url: BASE.to_string(),
+            catalog: RwLock::new(Arc::new(Catalog::sample())),
+            auth: Some(BasicAuth {
+                user: "admin".to_string(),
+                pass: "secret".to_string(),
+                realm: "Test".to_string(),
+            }),
         }))
     }
 
@@ -1012,6 +1154,75 @@ mod tests {
 
         // Non-image bytes yield no thumbnail (caller falls back).
         assert!(assets::thumbnail(b"not an image", 160, 240).is_none());
+    }
+
+    #[test]
+    fn base64_round_trips() {
+        for sample in ["admin:secret", "", "a", "ab", "abc", "user:p@ss:word"] {
+            let encoded = base64::encode(sample.as_bytes());
+            assert_eq!(base64::decode(&encoded).unwrap(), sample.as_bytes());
+        }
+    }
+
+    #[tokio::test]
+    async fn protected_catalog_challenges_without_credentials() {
+        let response = test_app_with_auth()
+            .oneshot(Request::builder().uri("/opds").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], AUTH_MEDIA_TYPE);
+        assert!(response.headers().contains_key(header::WWW_AUTHENTICATE));
+
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            json["authentication"][0]["type"],
+            "http://opds-spec.org/auth/basic"
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_catalog_accepts_valid_credentials() {
+        let credentials = base64::encode(b"admin:secret");
+        let response = test_app_with_auth()
+            .oneshot(
+                Request::builder()
+                    .uri("/opds")
+                    .header(header::AUTHORIZATION, format!("Basic {credentials}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn protected_catalog_rejects_wrong_password() {
+        let credentials = base64::encode(b"admin:wrong");
+        let response = test_app_with_auth()
+            .oneshot(
+                Request::builder()
+                    .uri("/opds")
+                    .header(header::AUTHORIZATION, format!("Basic {credentials}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_document_is_reachable_without_credentials() {
+        let response = test_app_with_auth()
+            .oneshot(Request::builder().uri("/opds/auth").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], AUTH_MEDIA_TYPE);
     }
 
     // Books in Fiction/ and Non-Fiction/ subfolders are found recursively and
