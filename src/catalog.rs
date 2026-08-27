@@ -25,6 +25,9 @@ pub struct Book {
     pub category: Category,
     /// Price in USD for a paid title, or `None` for a free/open-access download.
     pub price_usd: Option<f64>,
+    /// Whether the title is borrowed (library lending) rather than downloaded
+    /// or bought outright.
+    pub lendable: bool,
     /// Where the book's bytes come from.
     pub source: BookSource,
     /// The embedded cover image, when one was found. Absent covers are served as
@@ -251,12 +254,18 @@ pub(crate) fn book_from_file(root: &Path, path: PathBuf, meta: epub::EpubMeta) -
         modified: meta.modified,
         category,
         price_usd: None,
+        lendable: false,
         source: BookSource::File { path },
         cover: meta.cover,
     }
 }
 
 impl Book {
+    /// A freely downloadable title: neither for sale nor lent.
+    pub fn is_open_access(&self) -> bool {
+        self.price_usd.is_none() && !self.lendable
+    }
+
     /// Build the OPDS `Publication` (as embedded in a feed) for this book.
     pub fn to_publication(&self, base: &str) -> Publication {
         let mut metadata = Metadata::new(self.title.clone());
@@ -271,14 +280,38 @@ impl Book {
             .with_rel("self")
             .with_type(PUBLICATION_MEDIA_TYPE);
 
-        // Acquisition link: a free download, or a paid "buy" link with a price.
-        let acquisition = match self.price_usd {
-            None => Link::new(format!("{base}/opds/download/{}.epub", self.id))
-                .with_rel("http://opds-spec.org/acquisition/open-access")
-                .with_type("application/epub+zip"),
-            // The buy link points at an HTML purchase page; the actual file is
-            // obtained indirectly afterwards, described by indirectAcquisition.
-            Some(price) => Link::new(format!("{base}/opds/buy/{}", self.id))
+        // Acquisition link: a library borrow, a paid buy, or a free download.
+        // Borrow and buy both reach the file indirectly (via an intermediate
+        // page), described by indirectAcquisition.
+        let epub_indirect = || {
+            vec![IndirectAcquisition {
+                type_: "application/epub+zip".to_string(),
+                child: Vec::new(),
+            }]
+        };
+        let acquisition = if self.lendable {
+            Link::new(format!("{base}/opds/borrow/{}", self.id))
+                .with_rel("http://opds-spec.org/acquisition/borrow")
+                .with_type("text/html")
+                .with_properties(LinkProperties {
+                    indirect_acquisition: epub_indirect(),
+                    availability: Some(Availability {
+                        state: "available".to_string(),
+                        since: None,
+                        until: None,
+                    }),
+                    copies: Some(Copies {
+                        total: Some(3),
+                        available: Some(2),
+                    }),
+                    holds: Some(Holds {
+                        total: Some(1),
+                        position: None,
+                    }),
+                    ..Default::default()
+                })
+        } else if let Some(price) = self.price_usd {
+            Link::new(format!("{base}/opds/buy/{}", self.id))
                 .with_rel("http://opds-spec.org/acquisition/buy")
                 .with_type("text/html")
                 .with_properties(LinkProperties {
@@ -286,12 +319,13 @@ impl Book {
                         currency: "USD".to_string(),
                         value: price,
                     }),
-                    indirect_acquisition: vec![IndirectAcquisition {
-                        type_: "application/epub+zip".to_string(),
-                        child: Vec::new(),
-                    }],
+                    indirect_acquisition: epub_indirect(),
                     ..Default::default()
-                }),
+                })
+        } else {
+            Link::new(format!("{base}/opds/download/{}.epub", self.id))
+                .with_rel("http://opds-spec.org/acquisition/open-access")
+                .with_type("application/epub+zip")
         };
 
         // Cover: a real embedded image when we have one, otherwise a generated
@@ -348,7 +382,8 @@ fn sample_books() -> Vec<Book> {
                 description: &str,
                 modified: &str,
                 category: Category,
-                price_usd: Option<f64>| Book {
+                price_usd: Option<f64>,
+                lendable: bool| Book {
         id: id.to_string(),
         title: title.to_string(),
         author: author.to_string(),
@@ -357,6 +392,7 @@ fn sample_books() -> Vec<Book> {
         modified: Some(modified.to_string()),
         category,
         price_usd,
+        lendable,
         source: BookSource::Sample,
         cover: None,
     };
@@ -370,6 +406,7 @@ fn sample_books() -> Vec<Book> {
             "2015-09-29T17:00:00Z",
             Category::Fiction,
             None,
+            false,
         ),
         book(
             "pride-and-prejudice",
@@ -379,6 +416,7 @@ fn sample_books() -> Vec<Book> {
             "2016-01-12T09:30:00Z",
             Category::Fiction,
             Some(4.99),
+            false,
         ),
         book(
             "frankenstein",
@@ -388,6 +426,7 @@ fn sample_books() -> Vec<Book> {
             "2018-07-03T12:00:00Z",
             Category::Fiction,
             None,
+            false,
         ),
         book(
             "on-the-origin-of-species",
@@ -397,6 +436,7 @@ fn sample_books() -> Vec<Book> {
             "2017-11-24T00:00:00Z",
             Category::NonFiction,
             Some(2.99),
+            false,
         ),
         book(
             "the-art-of-war",
@@ -406,6 +446,7 @@ fn sample_books() -> Vec<Book> {
             "2019-02-14T08:00:00Z",
             Category::NonFiction,
             None,
+            true, // borrowable — demonstrates library lending
         ),
     ]
 }

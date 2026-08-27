@@ -46,6 +46,7 @@ when a book has no cover).
 | `GET /opds/search?query=...`   | Search feed; also accepts `author=` and `title=` field filters. |
 | `GET /opds/download/{id}.epub` | Open-access download: a generated minimal EPUB 3.       |
 | `GET /opds/buy/{id}`           | Advertised for spec completeness; returns 501 (no store).|
+| `GET /opds/borrow/{id}`        | Advertised for lendable titles; returns 501 (no lending).|
 | `GET /opds/covers/{id}.svg`    | Generated SVG cover (`{id}-thumb.svg` for the thumbnail).|
 
 ## What's implemented
@@ -58,10 +59,11 @@ when a book has no cover).
 - A filesystem-backed catalog (`OPDS_LIBRARY_DIR`) that scans EPUB files for
   metadata and covers and live-reloads on additions/removals, alongside the
   built-in sample catalog.
-- Acquisition links: free `open-access` downloads and paid `buy` links carrying
-  a `price` (currency + value) and an `indirectAcquisition` describing the file
-  obtained after the (HTML) purchase page — both backed by working endpoints.
-  Downloads stream real EPUB bytes (or a generated minimal EPUB 3 for samples).
+- Acquisition links: free `open-access` downloads, paid `buy` links (with a
+  `price` and an `indirectAcquisition`), and library `borrow` links carrying
+  lending `availability`/`copies`/`holds` (an OPDS extension). Downloads stream
+  real EPUB bytes (or a generated minimal EPUB 3 for samples); buy and borrow
+  are advertised but report 501.
 - Cover `images` (full-size + thumbnail), served from the EPUB's embedded cover
   (thumbnails are downscaled to fit 160x240 and re-encoded as JPEG) or as a
   generated SVG placeholder.

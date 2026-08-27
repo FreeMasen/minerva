@@ -104,6 +104,7 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/opds/search", get(search))
         .route("/opds/download/{file}", get(download))
         .route("/opds/buy/{id}", get(buy))
+        .route("/opds/borrow/{id}", get(borrow))
         .route("/opds/covers/{id}", get(cover))
         .route("/opds/covers/{id}/thumb", get(cover_thumb))
         .layer(tower_http::trace::TraceLayer::new_for_http())
@@ -426,7 +427,7 @@ async fn download(State(state): State<Arc<AppState>>, Path(file): Path<String>) 
 
     match &book.source {
         BookSource::Sample => {
-            if book.price_usd.is_some() {
+            if !book.is_open_access() {
                 return not_found("This publication is not available for open-access download");
             }
             epub_response(&format!("{id}.epub"), assets::epub_bytes(book))
@@ -479,6 +480,20 @@ async fn buy(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Resp
         .unwrap_or_else(|| "an unlisted price".to_string());
     let message = format!(
         "Purchasing is not available on this server. \"{}\" is listed at {price}.",
+        book.title,
+    );
+    (StatusCode::NOT_IMPLEMENTED, message).into_response()
+}
+
+/// Like `buy`, the `borrow` acquisition link is advertised (with availability
+/// and copy/hold counts) for completeness, but lending is not implemented.
+async fn borrow(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let catalog = state.snapshot();
+    let Some(book) = catalog.get(&id) else {
+        return not_found("No such publication");
+    };
+    let message = format!(
+        "Borrowing is not available on this server. \"{}\" is listed as lendable.",
         book.title,
     );
     (StatusCode::NOT_IMPLEMENTED, message).into_response()
@@ -728,6 +743,46 @@ mod tests {
             buy["properties"]["indirectAcquisition"][0]["type"],
             "application/epub+zip"
         );
+    }
+
+    #[tokio::test]
+    async fn lendable_publication_has_borrow_with_availability() {
+        let (_, _, json) = get("/opds/publications/the-art-of-war").await;
+        let borrow = json["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["rel"] == "http://opds-spec.org/acquisition/borrow")
+            .expect("a borrow link");
+        assert_eq!(borrow["type"], "text/html");
+        let props = &borrow["properties"];
+        assert_eq!(props["availability"]["state"], "available");
+        assert_eq!(props["copies"]["total"], 3);
+        assert_eq!(props["copies"]["available"], 2);
+        assert_eq!(props["holds"]["total"], 1);
+        assert_eq!(props["indirectAcquisition"][0]["type"], "application/epub+zip");
+
+        // A lendable title has no buy or open-access link, and its download
+        // endpoint refuses.
+        assert!(
+            json["links"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|l| l["rel"] != "http://opds-spec.org/acquisition/open-access")
+        );
+        let (status, _, _, _) = get_raw("/opds/download/the-art-of-war.epub").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn borrow_endpoint_is_not_implemented() {
+        let (status, _, _, bytes) = get_raw("/opds/borrow/the-art-of-war").await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert!(String::from_utf8(bytes).unwrap().contains("The Art of War"));
+
+        let (status, _, _, _) = get_raw("/opds/borrow/does-not-exist").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

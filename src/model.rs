@@ -233,6 +233,49 @@ pub struct LinkProperties {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub indirect_acquisition: Vec<IndirectAcquisition>,
+
+    // --- Library lending (an OPDS extension, not part of core OPDS 2.0) ---
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub availability: Option<Availability>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holds: Option<Holds>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copies: Option<Copies>,
+}
+
+/// Lending availability of a resource.
+#[derive(Debug, Clone, Serialize)]
+pub struct Availability {
+    /// One of `available`, `unavailable`, `reserved`, `ready`.
+    pub state: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
+}
+
+/// Hold (reservation) counts for a lendable resource.
+#[derive(Debug, Clone, Serialize)]
+pub struct Holds {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position: Option<u64>,
+}
+
+/// Copy counts for a lendable resource.
+#[derive(Debug, Clone, Serialize)]
+pub struct Copies {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available: Option<u64>,
 }
 
 /// A price with an ISO 4217 currency code and a decimal value.
