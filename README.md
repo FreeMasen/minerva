@@ -19,15 +19,16 @@ OPDS_DB=/var/lib/opds/catalog.db cargo run
 OPDS_BASE_URL=https://books.example.com cargo run
 # serve a real library: scan a directory of EPUB files instead of the samples
 OPDS_LIBRARY_DIR=/path/to/epubs cargo run
-# protect the catalog with HTTP Basic auth backed by a SQLite user database
-OPDS_AUTH_DB=opds-auth.db cargo run adduser alice   # prompts for a password
-OPDS_AUTH_DB=opds-auth.db cargo run                 # now the catalog requires login
+# add an account (stored in the same OPDS_DB); the catalog then requires login
+cargo run adduser alice        # prompts for a password
+cargo run                      # HTTP Basic auth is enforced while any account exists
 ```
 
 The server listens on `0.0.0.0:3000`. Visit http://localhost:3000/opds.
 
-The catalog and the user accounts are both SQLite databases; point `OPDS_DB`
-and `OPDS_AUTH_DB` at the same file if you'd prefer a single database.
+The catalog and the user accounts live in one SQLite database (`OPDS_DB`, in a
+`books` and a `users` table). HTTP Basic auth is enforced whenever at least one
+account exists, and the catalog is open otherwise.
 
 ## Catalog source
 
@@ -61,7 +62,7 @@ no cover).
 | `GET /opds/buy/{id}`           | Advertised for spec completeness; returns 501 (no store).|
 | `GET /opds/borrow/{id}`        | Advertised for lendable titles; returns 501 (no lending).|
 | `GET /opds/covers/{id}.svg`    | Generated SVG cover (`{id}-thumb.svg` for the thumbnail).|
-| `GET /opds/auth`               | Authentication document (when `OPDS_AUTH_DB` is set).   |
+| `GET /opds/auth`               | Authentication document (when auth is enabled).         |
 
 ## What's implemented
 
@@ -85,12 +86,12 @@ no cover).
   endpoint supporting a general query plus per-field author/title filters.
 - Pagination on the acquisition feed: `numberOfItems`/`itemsPerPage`/`currentPage`
   metadata plus `first`/`previous`/`next`/`last` links.
-- Optional multi-account HTTP Basic authentication backed by a SQLite user
-  database (`OPDS_AUTH_DB`), with Argon2-hashed passwords and constant-time
-  verification (RustCrypto). Manage accounts with the `adduser` subcommand.
-  Protected resources answer 401 with an Authentication for OPDS document
-  (`application/opds-authentication+json`), also served (unprotected) at
-  `/opds/auth`.
+- Optional multi-account HTTP Basic authentication (accounts in the `users`
+  table of `OPDS_DB`), with Argon2-hashed passwords and constant-time
+  verification (RustCrypto). Manage accounts with the `adduser` subcommand;
+  auth is enforced whenever an account exists. Protected resources answer 401
+  with an Authentication for OPDS document (`application/opds-authentication+json`),
+  also served (unprotected) at `/opds/auth`.
 - Correct OPDS media types on every response.
 
 ## Tests

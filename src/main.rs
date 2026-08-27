@@ -19,7 +19,7 @@ mod library;
 mod model;
 mod watch;
 
-use std::path::{Path as FsPath, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{
@@ -72,14 +72,13 @@ async fn main() {
     let base_url =
         std::env::var("OPDS_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
 
-    // The catalog lives in SQLite (OPDS_DB, default ./opds.db).
-    let db_path = std::env::var_os("OPDS_DB")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("opds.db"));
-    let catalog = Arc::new(CatalogStore::open(&db_path).await.unwrap_or_else(|err| {
+    // One SQLite database holds both the catalog and the user accounts.
+    let db_path = db_path();
+    let pool = db::connect(&db_path).await.unwrap_or_else(|err| {
         eprintln!("failed to open OPDS_DB ({}): {err}", db_path.display());
         std::process::exit(1);
-    }));
+    });
+    let catalog = Arc::new(CatalogStore::new(pool.clone()));
 
     // A configured, non-empty OPDS_LIBRARY_DIR reconciles the catalog against a
     // directory of EPUBs; otherwise we serve the built-in sample set.
@@ -98,24 +97,14 @@ async fn main() {
         }
     }
 
-    // Setting OPDS_AUTH_DB to a SQLite path enables HTTP Basic auth backed by
-    // that user database. A configured-but-unreadable database is fatal, so we
-    // never accidentally serve an intended-private catalog unprotected.
-    let auth = match std::env::var("OPDS_AUTH_DB").ok().filter(|s| !s.is_empty()) {
-        Some(path) => match AuthStore::open(FsPath::new(&path)).await {
-            Ok(store) => {
-                if store.user_count().await == 0 {
-                    tracing::warn!("auth enabled but no users exist; add one with `adduser`");
-                }
-                tracing::info!(db = %path, "HTTP Basic auth enabled");
-                Some(Arc::new(store))
-            }
-            Err(err) => {
-                eprintln!("failed to open OPDS_AUTH_DB ({path}): {err}");
-                std::process::exit(1);
-            }
-        },
-        None => None,
+    // HTTP Basic auth is enforced whenever the user table is non-empty: create
+    // an account with `adduser` to lock the catalog, and it's open otherwise.
+    let users = AuthStore::new(pool.clone());
+    let auth = if users.user_count().await > 0 {
+        tracing::info!("HTTP Basic auth enabled");
+        Some(Arc::new(users))
+    } else {
+        None
     };
 
     // Reflect additions/removals in the library directory as they happen. The
@@ -136,11 +125,11 @@ async fn main() {
     axum::serve(listener, app(state)).await.unwrap();
 }
 
-/// The path to the user database, from `OPDS_AUTH_DB` or a default in the CWD.
-fn auth_db_path() -> PathBuf {
-    std::env::var_os("OPDS_AUTH_DB")
+/// The path to the application database, from `OPDS_DB` or a default in the CWD.
+fn db_path() -> PathBuf {
+    std::env::var_os("OPDS_DB")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("opds-auth.db"))
+        .unwrap_or_else(|| PathBuf::from("opds.db"))
 }
 
 /// `adduser <username> [password]` — create or update an account. When no
@@ -158,8 +147,8 @@ async fn cmd_adduser(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         return Err("password must not be empty".into());
     }
 
-    let db_path = auth_db_path();
-    let store = AuthStore::open(&db_path).await?;
+    let db_path = db_path();
+    let store = AuthStore::new(db::connect(&db_path).await?);
     store.add_user(username, &password, None).await?;
     println!("user '{username}' saved to {}", db_path.display());
     Ok(())
@@ -758,7 +747,7 @@ mod tests {
 
     /// An in-memory catalog store seeded with the sample books.
     async fn sample_store() -> Arc<CatalogStore> {
-        let store = CatalogStore::open_in_memory().await.unwrap();
+        let store = CatalogStore::new(db::connect_memory().await.unwrap());
         store.reset_to_samples().await;
         Arc::new(store)
     }
@@ -772,12 +761,16 @@ mod tests {
     }
 
     async fn test_app_with_auth() -> Router {
-        let store = auth::AuthStore::open_in_memory().await.unwrap();
-        store.add_user("admin", "secret", None).await.unwrap();
+        // Catalog and users share one database, as in production.
+        let pool = db::connect_memory().await.unwrap();
+        let catalog = CatalogStore::new(pool.clone());
+        catalog.reset_to_samples().await;
+        let users = auth::AuthStore::new(pool);
+        users.add_user("admin", "secret", None).await.unwrap();
         app(Arc::new(AppState {
             base_url: BASE.to_string(),
-            catalog: sample_store().await,
-            auth: Some(Arc::new(store)),
+            catalog: Arc::new(catalog),
+            auth: Some(Arc::new(users)),
         }))
     }
 
@@ -1145,7 +1138,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
 
         // Reuse a sample book to synthesize a real EPUB on disk.
-        let store = CatalogStore::open_in_memory().await.unwrap();
+        let store = CatalogStore::new(db::connect_memory().await.unwrap());
         store.reset_to_samples().await;
         let book = store.get("moby-dick").await.unwrap();
         fs::write(dir.join("first.epub"), assets::epub_bytes(&book)).unwrap();
@@ -1188,7 +1181,7 @@ mod tests {
 
     #[tokio::test]
     async fn auth_store_hashes_and_verifies() {
-        let store = auth::AuthStore::open_in_memory().await.unwrap();
+        let store = auth::AuthStore::new(db::connect_memory().await.unwrap());
         store
             .add_user("alice", "correct horse", Some("Alice"))
             .await
@@ -1291,14 +1284,14 @@ mod tests {
         fs::create_dir_all(dir.join("Fiction")).unwrap();
         fs::create_dir_all(dir.join("Non-Fiction")).unwrap();
 
-        let samples = CatalogStore::open_in_memory().await.unwrap();
+        let samples = CatalogStore::new(db::connect_memory().await.unwrap());
         samples.reset_to_samples().await;
         let fiction = samples.get("moby-dick").await.unwrap();
         let nonfiction = samples.get("the-art-of-war").await.unwrap();
         fs::write(dir.join("Fiction/a.epub"), assets::epub_bytes(&fiction)).unwrap();
         fs::write(dir.join("Non-Fiction/b.epub"), assets::epub_bytes(&nonfiction)).unwrap();
 
-        let store = CatalogStore::open_in_memory().await.unwrap();
+        let store = CatalogStore::new(db::connect_memory().await.unwrap());
         store.reconcile_dir(&dir).await;
         assert_eq!(store.count().await, 2);
         for book in store.all().await {

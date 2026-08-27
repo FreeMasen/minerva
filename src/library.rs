@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use sqlx::SqlitePool;
 
 use crate::catalog::{self, Book, BookSource, Category};
-use crate::db;
 use crate::epub::CoverRef;
 
 /// A flat row from the `books` table, convertible to a [`Book`].
@@ -68,19 +67,9 @@ pub struct CatalogStore {
 }
 
 impl CatalogStore {
-    /// Open (creating if needed) the catalog database at `path`.
-    pub async fn open(path: &Path) -> Result<Self, sqlx::Error> {
-        Ok(CatalogStore {
-            pool: db::connect(path).await?,
-        })
-    }
-
-    /// An ephemeral in-memory catalog (used by tests).
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub async fn open_in_memory() -> Result<Self, sqlx::Error> {
-        Ok(CatalogStore {
-            pool: db::connect_memory().await?,
-        })
+    /// Wrap a shared connection pool.
+    pub fn new(pool: SqlitePool) -> Self {
+        CatalogStore { pool }
     }
 
     // --- Queries used by request handlers ---

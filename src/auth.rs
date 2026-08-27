@@ -5,14 +5,10 @@
 //! deliberately slow, so it runs on a blocking thread. Account management is
 //! done out-of-band via the `adduser` CLI subcommand.
 
-use std::path::Path;
-
 use argon2::Argon2;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use rand_core::OsRng;
 use sqlx::SqlitePool;
-
-use crate::db;
 
 /// A store of user accounts backed by a SQLite database.
 pub struct AuthStore {
@@ -20,19 +16,9 @@ pub struct AuthStore {
 }
 
 impl AuthStore {
-    /// Open (creating if needed) the user database at `path`.
-    pub async fn open(path: &Path) -> Result<Self, sqlx::Error> {
-        Ok(AuthStore {
-            pool: db::connect(path).await?,
-        })
-    }
-
-    /// An ephemeral in-memory store (used by tests).
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub async fn open_in_memory() -> Result<Self, sqlx::Error> {
-        Ok(AuthStore {
-            pool: db::connect_memory().await?,
-        })
+    /// Wrap a shared connection pool.
+    pub fn new(pool: SqlitePool) -> Self {
+        AuthStore { pool }
     }
 
     /// Number of registered accounts.
