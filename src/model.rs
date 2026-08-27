@@ -248,6 +248,9 @@ impl Link {
 #[serde(untagged)]
 pub enum Rel {
     One(String),
+    /// Multiple relations on one link. Part of the model for completeness; no
+    /// current link needs more than one relation.
+    #[allow(dead_code)]
     Many(Vec<String>),
 }
 

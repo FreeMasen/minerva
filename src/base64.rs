@@ -1,9 +1,12 @@
 //! Minimal standard-alphabet Base64 encode/decode, enough for HTTP Basic
 //! credentials. Avoids pulling in a dependency for such a small need.
 
+// `encode` (and hence the alphabet) is currently only exercised by tests.
+#[cfg_attr(not(test), allow(dead_code))]
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// Encode bytes as standard Base64 with `=` padding.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn encode(input: &[u8]) -> String {
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
