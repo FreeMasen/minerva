@@ -45,7 +45,7 @@ when a book has no cover).
 | `GET /opds/publications/{id}`  | A single publication document.                          |
 | `GET /opds/search?query=...`   | Search feed; also accepts `author=` and `title=` field filters. |
 | `GET /opds/download/{id}.epub` | Open-access download: a generated minimal EPUB 3.       |
-| `GET /opds/buy/{id}`           | Placeholder purchase page for a paid title.             |
+| `GET /opds/buy/{id}`           | Advertised for spec completeness; returns 501 (no store).|
 | `GET /opds/covers/{id}.svg`    | Generated SVG cover (`{id}-thumb.svg` for the thumbnail).|
 
 ## What's implemented
