@@ -14,11 +14,12 @@ mod auth;
 mod base64;
 mod catalog;
 mod epub;
+mod library;
 mod model;
 mod watch;
 
 use std::path::{Path as FsPath, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use axum::{
     Router,
@@ -31,7 +32,8 @@ use axum::{
 use serde::Deserialize;
 
 use crate::auth::AuthStore;
-use crate::catalog::{Book, BookSource, Catalog, Category};
+use crate::catalog::{BookSource, Category};
+use crate::library::CatalogStore;
 use crate::model::*;
 
 /// The HTTP Basic realm advertised to clients.
@@ -41,17 +43,10 @@ const AUTH_REALM: &str = "OPDS catalog";
 struct AppState {
     /// The externally-visible base URL used to build absolute hrefs.
     base_url: String,
-    /// The current catalog, hot-swapped by the file watcher on changes.
-    catalog: RwLock<Arc<Catalog>>,
+    /// The SQLite-backed catalog, queried per request.
+    catalog: Arc<CatalogStore>,
     /// The user store protecting the catalog, if configured.
     auth: Option<Arc<AuthStore>>,
-}
-
-impl AppState {
-    /// A cheap, point-in-time snapshot of the catalog for a request to read.
-    fn snapshot(&self) -> Arc<Catalog> {
-        self.catalog.read().unwrap().clone()
-    }
 }
 
 #[tokio::main]
@@ -76,24 +71,31 @@ async fn main() {
     let base_url =
         std::env::var("OPDS_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
 
-    // A configured, non-empty OPDS_LIBRARY_DIR selects the filesystem catalog;
-    // otherwise we serve the built-in sample set.
+    // The catalog lives in SQLite (OPDS_DB, default ./opds.db).
+    let db_path = std::env::var_os("OPDS_DB")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("opds.db"));
+    let catalog = Arc::new(CatalogStore::open(&db_path).unwrap_or_else(|err| {
+        eprintln!("failed to open OPDS_DB ({}): {err}", db_path.display());
+        std::process::exit(1);
+    }));
+
+    // A configured, non-empty OPDS_LIBRARY_DIR reconciles the catalog against a
+    // directory of EPUBs; otherwise we serve the built-in sample set.
     let library_dir = std::env::var_os("OPDS_LIBRARY_DIR")
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty());
 
-    // For a library directory, scan once into a path-keyed index that both the
-    // initial catalog and the watcher share; otherwise use the sample catalog.
-    let (catalog, library) = match &library_dir {
+    match &library_dir {
         Some(dir) => {
-            let index = catalog::scan(dir);
-            (Catalog::from_index(&index), Some((dir.clone(), index)))
+            catalog.remove_sample_books();
+            catalog.reconcile_dir(dir);
         }
         None => {
             tracing::info!("OPDS_LIBRARY_DIR unset; serving the built-in sample catalog");
-            (Catalog::sample(), None)
+            catalog.reset_to_samples();
         }
-    };
+    }
 
     // Setting OPDS_AUTH_DB to a SQLite path enables HTTP Basic auth backed by
     // that user database. A configured-but-unreadable database is fatal, so we
@@ -117,16 +119,16 @@ async fn main() {
             }
         });
 
+    // Reflect additions/removals in the library directory as they happen.
+    if let Some(dir) = library_dir {
+        watch::spawn(dir, catalog.clone());
+    }
+
     let state = Arc::new(AppState {
         base_url,
-        catalog: RwLock::new(Arc::new(catalog)),
+        catalog,
         auth,
     });
-
-    // Reflect additions/removals in the library directory as they happen.
-    if let Some((dir, index)) = library {
-        watch::spawn(dir, index, state.clone());
-    }
 
     let addr = "0.0.0.0:3000";
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
@@ -337,8 +339,8 @@ async fn root_redirect() -> Response {
 /// Category" navigation group.
 async fn root_feed(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let base = &state.base_url;
-    let catalog = state.snapshot();
-    let books = catalog.books();
+    let total = state.catalog.count();
+    let recent = state.catalog.recent(PAGE_SIZE);
 
     let mut feed = Feed::new("Example OPDS Catalog", format!("{base}/opds"))
         .with_link(
@@ -377,7 +379,7 @@ async fn root_feed(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // A "New Publications" group: a short preview of publications whose `self`
     // link resolves to the full acquisition feed.
     let mut new_meta = Metadata::new("New Publications");
-    new_meta.number_of_items = Some(books.len() as u64);
+    new_meta.number_of_items = Some(total);
     let new_group = Group {
         metadata: new_meta,
         links: vec![
@@ -386,11 +388,7 @@ async fn root_feed(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 .with_type(FEED_MEDIA_TYPE),
         ],
         navigation: Vec::new(),
-        publications: books
-            .iter()
-            .take(PAGE_SIZE as usize)
-            .map(|b| b.to_publication(base))
-            .collect(),
+        publications: recent.iter().map(|b| b.to_publication(base)).collect(),
     };
 
     // A "Browse by Category" group: a navigation collection of category feeds.
@@ -427,17 +425,13 @@ async fn all_publications(
     Query(params): Query<PageParams>,
 ) -> impl IntoResponse {
     let base = &state.base_url;
-    let catalog = state.snapshot();
-    let books = catalog.books();
-    let total = books.len() as u64;
+    let total = state.catalog.count();
 
     // At least one page even when the catalog is empty.
     let last_page = total.div_ceil(PAGE_SIZE).max(1);
     let page = params.page.unwrap_or(1).clamp(1, last_page);
 
-    let start = ((page - 1) * PAGE_SIZE) as usize;
-    let end = (start + PAGE_SIZE as usize).min(books.len());
-    let page_books = &books[start..end];
+    let page_books = state.catalog.page(PAGE_SIZE, (page - 1) * PAGE_SIZE);
 
     let page_href = |p: u64| format!("{base}/opds/all?page={p}");
 
@@ -477,7 +471,7 @@ async fn all_publications(
     feed.metadata.items_per_page = Some(PAGE_SIZE);
     feed.metadata.current_page = Some(page);
     feed.publications = page_books.iter().map(|b| b.to_publication(base)).collect();
-    feed.facets = vec![category_facet(base, books)];
+    feed.facets = vec![category_facet(base, &state.catalog)];
 
     Opds::feed(feed)
 }
@@ -493,12 +487,7 @@ async fn category_feed(
         return not_found("No such category");
     };
 
-    let catalog = state.snapshot();
-    let books: Vec<&Book> = catalog
-        .books()
-        .iter()
-        .filter(|b| b.category == category)
-        .collect();
+    let books = state.catalog.by_category(category);
 
     let mut feed = Feed::new(
         category.label(),
@@ -526,8 +515,7 @@ async fn publication(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Response {
-    let catalog = state.snapshot();
-    match catalog.get(&id) {
+    match state.catalog.get(&id) {
         Some(book) => Opds::publication(book.to_publication(&state.base_url)).into_response(),
         None => not_found("No such publication"),
     }
@@ -557,28 +545,7 @@ async fn search(
     let author = params.author.as_deref().unwrap_or_default().trim().to_lowercase();
     let title = params.title.as_deref().unwrap_or_default().trim().to_lowercase();
 
-    let catalog = state.snapshot();
-    let matches: Vec<&Book> = if query.is_empty() && author.is_empty() && title.is_empty() {
-        Vec::new()
-    } else {
-        catalog
-            .books()
-            .iter()
-            .filter(|b| {
-                let query_ok = query.is_empty()
-                    || b.title.to_lowercase().contains(&query)
-                    || b.author.to_lowercase().contains(&query)
-                    || b.description
-                        .as_deref()
-                        .unwrap_or_default()
-                        .to_lowercase()
-                        .contains(&query);
-                let author_ok = author.is_empty() || b.author.to_lowercase().contains(&author);
-                let title_ok = title.is_empty() || b.title.to_lowercase().contains(&title);
-                query_ok && author_ok && title_ok
-            })
-            .collect()
-    };
+    let matches = state.catalog.search(&query, &author, &title);
 
     // Echo the supplied parameters back in the self link.
     let mut self_href = format!("{base}/opds/search?query={}", urlencode(&params.query));
@@ -606,9 +573,8 @@ async fn search(
 /// get a generated EPUB; file-backed books stream their bytes from disk.
 async fn download(State(state): State<Arc<AppState>>, Path(file): Path<String>) -> Response {
     let id = file.strip_suffix(".epub").unwrap_or(&file).to_string();
-    let catalog = state.snapshot();
 
-    let Some(book) = catalog.get(&id) else {
+    let Some(book) = state.catalog.get(&id) else {
         return not_found("No such publication");
     };
 
@@ -617,7 +583,7 @@ async fn download(State(state): State<Arc<AppState>>, Path(file): Path<String>) 
             if !book.is_open_access() {
                 return not_found("This publication is not available for open-access download");
             }
-            epub_response(&format!("{id}.epub"), assets::epub_bytes(book))
+            epub_response(&format!("{id}.epub"), assets::epub_bytes(&book))
         }
         BookSource::File { path } => {
             let filename = path
@@ -656,8 +622,7 @@ fn epub_response(filename: &str, bytes: Vec<u8>) -> Response {
 /// acquisition) for spec completeness, but this server is not a store. An
 /// unknown id still 404s; a real publication reports 501 Not Implemented.
 async fn buy(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    let catalog = state.snapshot();
-    let Some(book) = catalog.get(&id) else {
+    let Some(book) = state.catalog.get(&id) else {
         return not_found("No such publication");
     };
 
@@ -675,8 +640,7 @@ async fn buy(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Resp
 /// Like `buy`, the `borrow` acquisition link is advertised (with availability
 /// and copy/hold counts) for completeness, but lending is not implemented.
 async fn borrow(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    let catalog = state.snapshot();
-    let Some(book) = catalog.get(&id) else {
+    let Some(book) = state.catalog.get(&id) else {
         return not_found("No such publication");
     };
     let message = format!(
@@ -700,8 +664,7 @@ async fn cover_thumb(State(state): State<Arc<AppState>>, Path(id): Path<String>)
 /// generated SVG placeholder when there is no embedded cover (or it can't be
 /// read).
 async fn serve_cover(state: Arc<AppState>, id: String, thumbnail: bool) -> Response {
-    let catalog = state.snapshot();
-    let Some(book) = catalog.get(&id) else {
+    let Some(book) = state.catalog.get(&id) else {
         return not_found("No such cover");
     };
 
@@ -736,22 +699,18 @@ async fn serve_cover(state: Arc<AppState>, id: String, thumbnail: bool) -> Respo
     }
 
     let (width, height) = if thumbnail { (160, 240) } else { (800, 1200) };
-    let svg = assets::cover_svg(book, width, height);
+    let svg = assets::cover_svg(&book, width, height);
     ([(header::CONTENT_TYPE, "image/svg+xml")], svg).into_response()
 }
 
 /// Build a "Category" facet group linking to each category feed.
-fn category_facet(base: &str, books: &[Book]) -> Facet {
-    let count = |category: Category| {
-        books.iter().filter(|b| b.category == category).count() as u64
-    };
-
+fn category_facet(base: &str, catalog: &CatalogStore) -> Facet {
     let facet_link = |category: Category| {
         Link::new(format!("{base}/opds/category/{}", category.slug()))
             .with_type(FEED_MEDIA_TYPE)
             .with_title(category.label())
             .with_properties(LinkProperties {
-                number_of_items: Some(count(category)),
+                number_of_items: Some(catalog.count_category(category)),
                 ..Default::default()
             })
     };
@@ -796,10 +755,17 @@ mod tests {
 
     const BASE: &str = "http://localhost:3000";
 
+    /// An in-memory catalog store seeded with the sample books.
+    fn sample_store() -> Arc<CatalogStore> {
+        let store = CatalogStore::open_in_memory().unwrap();
+        store.reset_to_samples();
+        Arc::new(store)
+    }
+
     fn test_app() -> Router {
         app(Arc::new(AppState {
             base_url: BASE.to_string(),
-            catalog: RwLock::new(Arc::new(Catalog::sample())),
+            catalog: sample_store(),
             auth: None,
         }))
     }
@@ -809,7 +775,7 @@ mod tests {
         store.add_user("admin", "secret", None).unwrap();
         app(Arc::new(AppState {
             base_url: BASE.to_string(),
-            catalog: RwLock::new(Arc::new(Catalog::sample())),
+            catalog: sample_store(),
             auth: Some(Arc::new(store)),
         }))
     }
@@ -1163,10 +1129,11 @@ mod tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
-    // A generated EPUB, when written to a directory and scanned back, is
-    // recognized and its metadata recovered — and a rescan reflects removal.
+    // A generated EPUB, when written to a directory and reconciled into the
+    // store, is recognized and its metadata recovered — and a later reconcile
+    // reflects removal.
     #[test]
-    fn scans_directory_and_reflects_add_and_remove() {
+    fn reconcile_reflects_add_and_remove() {
         use std::fs;
 
         let dir = std::env::temp_dir().join(format!("opds-scan-test-{}", std::process::id()));
@@ -1174,21 +1141,24 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
 
         // Reuse a sample book to synthesize a real EPUB on disk.
-        let sample = Catalog::sample();
-        let book = &sample.books()[0];
-        fs::write(dir.join("first.epub"), assets::epub_bytes(book)).unwrap();
+        let store = CatalogStore::open_in_memory().unwrap();
+        store.reset_to_samples();
+        let book = store.get("moby-dick").unwrap();
+        fs::write(dir.join("first.epub"), assets::epub_bytes(&book)).unwrap();
 
-        let scanned = Catalog::from_dir(&dir);
-        assert_eq!(scanned.books().len(), 1);
-        let found = &scanned.books()[0];
+        // Reconcile clears samples (removed by the caller) and picks up the file.
+        store.remove_sample_books();
+        store.reconcile_dir(&dir);
+        assert_eq!(store.count(), 1);
+        let found = &store.all()[0];
         assert_eq!(found.title, book.title);
         assert_eq!(found.author, book.author);
         assert!(matches!(found.source, BookSource::File { .. }));
 
-        // Removing the file and rescanning drops the book.
+        // Removing the file and reconciling drops the book.
         fs::remove_file(dir.join("first.epub")).unwrap();
-        let scanned = Catalog::from_dir(&dir);
-        assert!(scanned.books().is_empty());
+        store.reconcile_dir(&dir);
+        assert_eq!(store.count(), 0);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1310,15 +1280,17 @@ mod tests {
         fs::create_dir_all(dir.join("Fiction")).unwrap();
         fs::create_dir_all(dir.join("Non-Fiction")).unwrap();
 
-        let sample = Catalog::sample();
-        let fiction = sample.get("moby-dick").unwrap();
-        let nonfiction = sample.get("the-art-of-war").unwrap();
-        fs::write(dir.join("Fiction/a.epub"), assets::epub_bytes(fiction)).unwrap();
-        fs::write(dir.join("Non-Fiction/b.epub"), assets::epub_bytes(nonfiction)).unwrap();
+        let samples = CatalogStore::open_in_memory().unwrap();
+        samples.reset_to_samples();
+        let fiction = samples.get("moby-dick").unwrap();
+        let nonfiction = samples.get("the-art-of-war").unwrap();
+        fs::write(dir.join("Fiction/a.epub"), assets::epub_bytes(&fiction)).unwrap();
+        fs::write(dir.join("Non-Fiction/b.epub"), assets::epub_bytes(&nonfiction)).unwrap();
 
-        let cat = Catalog::from_dir(&dir);
-        assert_eq!(cat.books().len(), 2);
-        for book in cat.books() {
+        let store = CatalogStore::open_in_memory().unwrap();
+        store.reconcile_dir(&dir);
+        assert_eq!(store.count(), 2);
+        for book in store.all() {
             if book.title.contains("Moby") {
                 assert_eq!(book.category, Category::Fiction);
             } else if book.title.contains("Art of War") {

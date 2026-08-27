@@ -1,11 +1,10 @@
-//! The catalog: the set of publications the server exposes.
+//! The catalog domain types and EPUB scanning.
 //!
-//! A [`Catalog`] is either the built-in [`Catalog::sample`] set (served when no
-//! library directory is configured) or the result of scanning a directory of
-//! EPUB files with [`Catalog::from_dir`]. Handlers see the same types either
-//! way; only the [`BookSource`] differs.
+//! [`Book`] is the server's own representation of a publication (as opposed to
+//! the wire `Publication`). Books come either from the built-in [`sample_books`]
+//! set or from scanning a directory of EPUB files; persistence and querying live
+//! in [`crate::library`].
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::epub::{self, CoverRef};
@@ -118,70 +117,6 @@ impl Category {
     }
 }
 
-/// A set of books, indexed by id for lookup.
-pub struct Catalog {
-    books: Vec<Book>,
-    by_id: HashMap<String, usize>,
-}
-
-impl Catalog {
-    /// Build a catalog from a set of books, ordering them by title and assigning
-    /// stable, unique ids (disambiguating any that collide).
-    fn from_books(mut books: Vec<Book>) -> Self {
-        books.sort_by(|a, b| {
-            a.title
-                .to_lowercase()
-                .cmp(&b.title.to_lowercase())
-                .then_with(|| a.id.cmp(&b.id))
-        });
-
-        let mut seen: HashMap<String, u32> = HashMap::new();
-        for book in &mut books {
-            let count = seen.entry(book.id.clone()).or_insert(0);
-            if *count > 0 {
-                book.id = format!("{}-{}", book.id, *count + 1);
-            }
-            *count += 1;
-        }
-
-        let by_id = books
-            .iter()
-            .enumerate()
-            .map(|(i, b)| (b.id.clone(), i))
-            .collect();
-        Catalog { books, by_id }
-    }
-
-    /// All books, ordered by title.
-    pub fn books(&self) -> &[Book] {
-        &self.books
-    }
-
-    /// Look up a single book by its id.
-    pub fn get(&self, id: &str) -> Option<&Book> {
-        self.by_id.get(id).map(|&i| &self.books[i])
-    }
-
-    /// The built-in sample catalog of public-domain titles.
-    pub fn sample() -> Self {
-        Self::from_books(sample_books())
-    }
-
-    /// Build a catalog from a path-keyed index of books (as maintained by the
-    /// file watcher for incremental updates).
-    pub fn from_index(index: &HashMap<PathBuf, Book>) -> Self {
-        Self::from_books(index.values().cloned().collect())
-    }
-
-    /// Recursively scan a directory of `.epub` files and build a catalog from
-    /// their embedded metadata. A convenience wrapper over [`scan`] +
-    /// [`Catalog::from_index`], used in tests.
-    #[allow(dead_code)]
-    pub fn from_dir(dir: &Path) -> Self {
-        Self::from_index(&scan(dir))
-    }
-}
-
 /// Whether a path names an EPUB file (by extension).
 pub(crate) fn is_epub(path: &Path) -> bool {
     path.extension()
@@ -192,7 +127,7 @@ pub(crate) fn is_epub(path: &Path) -> bool {
 
 /// Recursively collect the `.epub` files under `root`, sorted. Symlinks are not
 /// followed, so symlinked directories can't cause cycles.
-fn epub_paths(root: &Path) -> Vec<PathBuf> {
+pub(crate) fn epub_paths(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
 
@@ -219,28 +154,9 @@ fn epub_paths(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Scan `dir` recursively and return a path-keyed index of the books found.
-/// Files that cannot be read or parsed are skipped with a warning, so a
-/// half-written file (mid-copy) simply doesn't appear until it's whole.
-pub fn scan(dir: &Path) -> HashMap<PathBuf, Book> {
-    let mut index = HashMap::new();
-    for path in epub_paths(dir) {
-        match epub::read_meta(&path) {
-            Ok(meta) => {
-                index.insert(path.clone(), book_from_file(dir, path, meta));
-            }
-            Err(err) => {
-                tracing::warn!(%err, path = %path.display(), "skipping unreadable EPUB");
-            }
-        }
-    }
-    tracing::info!(count = index.len(), dir = %dir.display(), "scanned library");
-    index
-}
-
 /// Build a [`Book`] from a scanned EPUB file and its metadata. The id is a
-/// provisional slug (deduplicated later by [`Catalog::from_books`]); the
-/// category prefers the top-level library subfolder, falling back to subjects.
+/// provisional slug (the store deduplicates on insert); the category prefers the
+/// top-level library subfolder, falling back to subjects.
 pub(crate) fn book_from_file(root: &Path, path: PathBuf, meta: epub::EpubMeta) -> Book {
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("book");
     let category = Category::from_path(root, &path).unwrap_or_else(|| Category::classify(&meta.subjects));
@@ -375,7 +291,7 @@ fn slugify(input: &str) -> String {
 }
 
 /// The built-in sample set, used when no library directory is configured.
-fn sample_books() -> Vec<Book> {
+pub(crate) fn sample_books() -> Vec<Book> {
     let book = |id: &str,
                 title: &str,
                 author: &str,

@@ -24,7 +24,8 @@ All previously-deferred items have been implemented. Kept here as a record.
 
 - Real purchase/borrow flows (currently 501) with entitlement + gated delivery.
 - Token/OAuth auth flows; per-user entitlements; roles/admin.
-- A SQLite connection pool (auth currently uses a single mutex-guarded
-  connection) if auth traffic grows.
+- A SQLite connection pool: the catalog and auth stores each use a single
+  mutex-guarded connection queried directly from async handlers. A pool (with
+  WAL) plus `spawn_blocking` would allow concurrent reads under load.
 - Larger-library performance: stream downloads instead of buffering; cache
   extracted covers.

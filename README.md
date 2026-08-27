@@ -13,6 +13,8 @@ JSON *collection* made of `metadata`, `links`, and sub-collections
 
 ```sh
 cargo run
+# the catalog is stored in SQLite (default ./opds.db); override the location
+OPDS_DB=/var/lib/opds/catalog.db cargo run
 # override the base URL used to build absolute hrefs (default http://localhost:3000)
 OPDS_BASE_URL=https://books.example.com cargo run
 # serve a real library: scan a directory of EPUB files instead of the samples
@@ -24,18 +26,26 @@ OPDS_AUTH_DB=opds-auth.db cargo run                 # now the catalog requires l
 
 The server listens on `0.0.0.0:3000`. Visit http://localhost:3000/opds.
 
+The catalog and the user accounts are both SQLite databases; point `OPDS_DB`
+and `OPDS_AUTH_DB` at the same file if you'd prefer a single database.
+
 ## Catalog source
 
-With no `OPDS_LIBRARY_DIR`, the server serves a built-in sample catalog of
-public-domain titles (with generated EPUBs and SVG covers).
+The catalog lives in a SQLite `books` table (`OPDS_DB`) and is queried per
+request rather than held in memory.
 
-When `OPDS_LIBRARY_DIR` points at a directory, the server instead scans it for
-`*.epub` files and builds the catalog from each file's embedded metadata
-(title, author, language, description, subjects) and cover image. The directory
-is **watched**: adding an EPUB makes it appear in the feeds and removing one
-drops it — no restart required. Downloads stream the real file bytes and cover
-requests serve the image embedded in the EPUB (falling back to a generated SVG
-when a book has no cover).
+With no `OPDS_LIBRARY_DIR`, the store is (re)seeded with a built-in sample
+catalog of public-domain titles (with generated EPUBs and SVG covers).
+
+When `OPDS_LIBRARY_DIR` points at a directory, the server reconciles the store
+against it — scanning `*.epub` files recursively and recording each file's
+embedded metadata (title, author, language, description, subjects) and cover.
+Unchanged files (matching a stored modification time) are skipped on restart, so
+startup is cheap for large, mostly-static libraries. The directory is
+**watched**: adding an EPUB inserts a row and removing one deletes it — no
+restart required. Downloads stream the real file bytes and cover requests serve
+the image embedded in the EPUB (falling back to a generated SVG when a book has
+no cover).
 
 ## Endpoints
 
@@ -98,8 +108,9 @@ removal.
 ## Layout
 
 - `src/model.rs` — serde types for the OPDS 2.0 wire format.
-- `src/catalog.rs` — the `Catalog`/`Book` types, the sample set, and the
-  directory scanner.
+- `src/catalog.rs` — the `Book`/`Category` domain types, the sample set, and
+  EPUB scanning helpers.
+- `src/library.rs` — the SQLite-backed catalog store (queries + reconciliation).
 - `src/epub.rs` — reads metadata and cover images out of EPUB files.
 - `src/assets.rs` — on-the-fly EPUB and SVG cover generation (for samples and
   cover fallbacks).
