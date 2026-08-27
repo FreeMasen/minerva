@@ -19,7 +19,7 @@ mod library;
 mod model;
 mod watch;
 
-use std::path::PathBuf;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
 use axum::{
@@ -30,6 +30,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use clap::{Parser, Subcommand};
 use serde::Deserialize;
 
 use crate::auth::AuthStore;
@@ -39,6 +40,37 @@ use crate::model::*;
 
 /// The HTTP Basic realm advertised to clients.
 const AUTH_REALM: &str = "OPDS catalog";
+
+/// An OPDS 2.0 catalog server built on Axum.
+#[derive(Parser)]
+#[command(name = "opds-axum", version, about)]
+struct Cli {
+    /// Externally-visible base URL used to build absolute hrefs.
+    #[arg(long, env = "OPDS_BASE_URL", default_value = "http://localhost:3000")]
+    base_url: String,
+
+    /// SQLite database holding the catalog and user accounts.
+    #[arg(long, env = "OPDS_DB", default_value = "opds.db", global = true)]
+    db: PathBuf,
+
+    /// Directory of EPUB files to serve instead of the built-in samples.
+    #[arg(long, env = "OPDS_LIBRARY_DIR")]
+    library_dir: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Create or update a user account (any account enables HTTP Basic auth).
+    Adduser {
+        /// The account username.
+        username: String,
+        /// The password; read from stdin if omitted.
+        password: Option<String>,
+    },
+}
 
 /// Shared application state.
 struct AppState {
@@ -52,6 +84,21 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
+    let cli = Cli::parse();
+
+    match &cli.command {
+        Some(Command::Adduser { username, password }) => {
+            if let Err(err) = cmd_adduser(&cli.db, username, password.clone()).await {
+                eprintln!("adduser: {err}");
+                std::process::exit(1);
+            }
+        }
+        None => run_server(cli).await,
+    }
+}
+
+/// Start the catalog server.
+async fn run_server(cli: Cli) {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -59,40 +106,23 @@ async fn main() {
         )
         .init();
 
-    // `opds-axum adduser <username> [password]` manages accounts and exits.
-    let args: Vec<String> = std::env::args().collect();
-    if args.get(1).map(String::as_str) == Some("adduser") {
-        if let Err(err) = cmd_adduser(&args[2..]).await {
-            eprintln!("adduser: {err}");
-            std::process::exit(1);
-        }
-        return;
-    }
-
-    let base_url =
-        std::env::var("OPDS_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
-
     // One SQLite database holds both the catalog and the user accounts.
-    let db_path = db_path();
-    let pool = db::connect(&db_path).await.unwrap_or_else(|err| {
-        eprintln!("failed to open OPDS_DB ({}): {err}", db_path.display());
+    let pool = db::connect(&cli.db).await.unwrap_or_else(|err| {
+        eprintln!("failed to open database ({}): {err}", cli.db.display());
         std::process::exit(1);
     });
     let catalog = Arc::new(CatalogStore::new(pool.clone()));
 
-    // A configured, non-empty OPDS_LIBRARY_DIR reconciles the catalog against a
-    // directory of EPUBs; otherwise we serve the built-in sample set.
-    let library_dir = std::env::var_os("OPDS_LIBRARY_DIR")
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty());
-
+    // A library directory reconciles the catalog against a directory of EPUBs;
+    // otherwise we serve the built-in sample set.
+    let library_dir = cli.library_dir.filter(|p| !p.as_os_str().is_empty());
     match &library_dir {
         Some(dir) => {
             catalog.remove_sample_books().await;
             catalog.reconcile_dir(dir).await;
         }
         None => {
-            tracing::info!("OPDS_LIBRARY_DIR unset; serving the built-in sample catalog");
+            tracing::info!("no library directory; serving the built-in sample catalog");
             catalog.reset_to_samples().await;
         }
     }
@@ -114,7 +144,7 @@ async fn main() {
     }
 
     let state = Arc::new(AppState {
-        base_url,
+        base_url: cli.base_url,
         catalog,
         auth,
     });
@@ -125,30 +155,22 @@ async fn main() {
     axum::serve(listener, app(state)).await.unwrap();
 }
 
-/// The path to the application database, from `OPDS_DB` or a default in the CWD.
-fn db_path() -> PathBuf {
-    std::env::var_os("OPDS_DB")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("opds.db"))
-}
-
-/// `adduser <username> [password]` — create or update an account. When no
-/// password argument is given, one is read from stdin.
-async fn cmd_adduser(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let username = args
-        .first()
-        .ok_or("usage: opds-axum adduser <username> [password]")?;
-
-    let password = match args.get(1) {
-        Some(password) => password.clone(),
+/// Create or update an account in the database at `db_path`. When no password
+/// is supplied, one is read from stdin.
+async fn cmd_adduser(
+    db_path: &FsPath,
+    username: &str,
+    password: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let password = match password {
+        Some(password) => password,
         None => prompt_password()?,
     };
     if password.is_empty() {
         return Err("password must not be empty".into());
     }
 
-    let db_path = db_path();
-    let store = AuthStore::new(db::connect(&db_path).await?);
+    let store = AuthStore::new(db::connect(db_path).await?);
     store.add_user(username, &password, None).await?;
     println!("user '{username}' saved to {}", db_path.display());
     Ok(())

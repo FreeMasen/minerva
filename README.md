@@ -24,6 +24,10 @@ cargo run adduser alice        # prompts for a password
 cargo run                      # HTTP Basic auth is enforced while any account exists
 ```
 
+Each of these environment variables is also a command-line flag (`--base-url`,
+`--db`, `--library-dir`); a flag takes precedence over its variable. Run
+`cargo run -- --help` for the full CLI.
+
 The server listens on `0.0.0.0:3000`. Visit http://localhost:3000/opds.
 
 The catalog and the user accounts live in one SQLite database (`OPDS_DB`, in a
