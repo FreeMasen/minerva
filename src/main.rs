@@ -13,6 +13,7 @@ mod assets;
 mod auth;
 mod base64;
 mod catalog;
+mod db;
 mod epub;
 mod library;
 mod model;
@@ -61,7 +62,7 @@ async fn main() {
     // `opds-axum adduser <username> [password]` manages accounts and exits.
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("adduser") {
-        if let Err(err) = cmd_adduser(&args[2..]) {
+        if let Err(err) = cmd_adduser(&args[2..]).await {
             eprintln!("adduser: {err}");
             std::process::exit(1);
         }
@@ -75,7 +76,7 @@ async fn main() {
     let db_path = std::env::var_os("OPDS_DB")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("opds.db"));
-    let catalog = Arc::new(CatalogStore::open(&db_path).unwrap_or_else(|err| {
+    let catalog = Arc::new(CatalogStore::open(&db_path).await.unwrap_or_else(|err| {
         eprintln!("failed to open OPDS_DB ({}): {err}", db_path.display());
         std::process::exit(1);
     }));
@@ -88,40 +89,39 @@ async fn main() {
 
     match &library_dir {
         Some(dir) => {
-            catalog.remove_sample_books();
-            catalog.reconcile_dir(dir);
+            catalog.remove_sample_books().await;
+            catalog.reconcile_dir(dir).await;
         }
         None => {
             tracing::info!("OPDS_LIBRARY_DIR unset; serving the built-in sample catalog");
-            catalog.reset_to_samples();
+            catalog.reset_to_samples().await;
         }
     }
 
     // Setting OPDS_AUTH_DB to a SQLite path enables HTTP Basic auth backed by
     // that user database. A configured-but-unreadable database is fatal, so we
     // never accidentally serve an intended-private catalog unprotected.
-    let auth = std::env::var("OPDS_AUTH_DB")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(|path| match AuthStore::open(FsPath::new(&path)) {
+    let auth = match std::env::var("OPDS_AUTH_DB").ok().filter(|s| !s.is_empty()) {
+        Some(path) => match AuthStore::open(FsPath::new(&path)).await {
             Ok(store) => {
-                if store.user_count() == 0 {
-                    tracing::warn!(
-                        "auth enabled but no users exist; add one with `adduser`"
-                    );
+                if store.user_count().await == 0 {
+                    tracing::warn!("auth enabled but no users exist; add one with `adduser`");
                 }
                 tracing::info!(db = %path, "HTTP Basic auth enabled");
-                Arc::new(store)
+                Some(Arc::new(store))
             }
             Err(err) => {
                 eprintln!("failed to open OPDS_AUTH_DB ({path}): {err}");
                 std::process::exit(1);
             }
-        });
+        },
+        None => None,
+    };
 
-    // Reflect additions/removals in the library directory as they happen.
+    // Reflect additions/removals in the library directory as they happen. The
+    // watcher runs on its own thread and drives the async store via this handle.
     if let Some(dir) = library_dir {
-        watch::spawn(dir, catalog.clone());
+        watch::spawn(dir, catalog.clone(), tokio::runtime::Handle::current());
     }
 
     let state = Arc::new(AppState {
@@ -145,7 +145,7 @@ fn auth_db_path() -> PathBuf {
 
 /// `adduser <username> [password]` — create or update an account. When no
 /// password argument is given, one is read from stdin.
-fn cmd_adduser(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_adduser(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let username = args
         .first()
         .ok_or("usage: opds-axum adduser <username> [password]")?;
@@ -159,8 +159,8 @@ fn cmd_adduser(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let db_path = auth_db_path();
-    let store = AuthStore::open(&db_path)?;
-    store.add_user(username, &password, None)?;
+    let store = AuthStore::open(&db_path).await?;
+    store.add_user(username, &password, None).await?;
     println!("user '{username}' saved to {}", db_path.display());
     Ok(())
 }
@@ -215,12 +215,10 @@ async fn require_auth(
         return next.run(request).await;
     };
 
-    // Verifying involves a SQLite lookup and a (deliberately slow) Argon2 hash,
-    // so run it off the async runtime.
+    // `verify` awaits the SQLite lookup and offloads the Argon2 hash to a
+    // blocking thread itself.
     let authorized = match extract_basic(request.headers()) {
-        Some((user, pass)) => tokio::task::spawn_blocking(move || store.verify(&user, &pass))
-            .await
-            .unwrap_or(false),
+        Some((user, pass)) => store.verify(&user, &pass).await,
         None => false,
     };
 
@@ -339,8 +337,8 @@ async fn root_redirect() -> Response {
 /// Category" navigation group.
 async fn root_feed(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let base = &state.base_url;
-    let total = state.catalog.count();
-    let recent = state.catalog.recent(PAGE_SIZE);
+    let total = state.catalog.count().await;
+    let recent = state.catalog.recent(PAGE_SIZE).await;
 
     let mut feed = Feed::new("Example OPDS Catalog", format!("{base}/opds"))
         .with_link(
@@ -425,13 +423,13 @@ async fn all_publications(
     Query(params): Query<PageParams>,
 ) -> impl IntoResponse {
     let base = &state.base_url;
-    let total = state.catalog.count();
+    let total = state.catalog.count().await;
 
     // At least one page even when the catalog is empty.
     let last_page = total.div_ceil(PAGE_SIZE).max(1);
     let page = params.page.unwrap_or(1).clamp(1, last_page);
 
-    let page_books = state.catalog.page(PAGE_SIZE, (page - 1) * PAGE_SIZE);
+    let page_books = state.catalog.page(PAGE_SIZE, (page - 1) * PAGE_SIZE).await;
 
     let page_href = |p: u64| format!("{base}/opds/all?page={p}");
 
@@ -471,7 +469,7 @@ async fn all_publications(
     feed.metadata.items_per_page = Some(PAGE_SIZE);
     feed.metadata.current_page = Some(page);
     feed.publications = page_books.iter().map(|b| b.to_publication(base)).collect();
-    feed.facets = vec![category_facet(base, &state.catalog)];
+    feed.facets = vec![category_facet(base, &state.catalog).await];
 
     Opds::feed(feed)
 }
@@ -487,7 +485,7 @@ async fn category_feed(
         return not_found("No such category");
     };
 
-    let books = state.catalog.by_category(category);
+    let books = state.catalog.by_category(category).await;
 
     let mut feed = Feed::new(
         category.label(),
@@ -515,7 +513,7 @@ async fn publication(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Response {
-    match state.catalog.get(&id) {
+    match state.catalog.get(&id).await {
         Some(book) => Opds::publication(book.to_publication(&state.base_url)).into_response(),
         None => not_found("No such publication"),
     }
@@ -545,7 +543,7 @@ async fn search(
     let author = params.author.as_deref().unwrap_or_default().trim().to_lowercase();
     let title = params.title.as_deref().unwrap_or_default().trim().to_lowercase();
 
-    let matches = state.catalog.search(&query, &author, &title);
+    let matches = state.catalog.search(&query, &author, &title).await;
 
     // Echo the supplied parameters back in the self link.
     let mut self_href = format!("{base}/opds/search?query={}", urlencode(&params.query));
@@ -574,7 +572,7 @@ async fn search(
 async fn download(State(state): State<Arc<AppState>>, Path(file): Path<String>) -> Response {
     let id = file.strip_suffix(".epub").unwrap_or(&file).to_string();
 
-    let Some(book) = state.catalog.get(&id) else {
+    let Some(book) = state.catalog.get(&id).await else {
         return not_found("No such publication");
     };
 
@@ -622,7 +620,7 @@ fn epub_response(filename: &str, bytes: Vec<u8>) -> Response {
 /// acquisition) for spec completeness, but this server is not a store. An
 /// unknown id still 404s; a real publication reports 501 Not Implemented.
 async fn buy(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    let Some(book) = state.catalog.get(&id) else {
+    let Some(book) = state.catalog.get(&id).await else {
         return not_found("No such publication");
     };
 
@@ -640,7 +638,7 @@ async fn buy(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Resp
 /// Like `buy`, the `borrow` acquisition link is advertised (with availability
 /// and copy/hold counts) for completeness, but lending is not implemented.
 async fn borrow(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    let Some(book) = state.catalog.get(&id) else {
+    let Some(book) = state.catalog.get(&id).await else {
         return not_found("No such publication");
     };
     let message = format!(
@@ -664,7 +662,7 @@ async fn cover_thumb(State(state): State<Arc<AppState>>, Path(id): Path<String>)
 /// generated SVG placeholder when there is no embedded cover (or it can't be
 /// read).
 async fn serve_cover(state: Arc<AppState>, id: String, thumbnail: bool) -> Response {
-    let Some(book) = state.catalog.get(&id) else {
+    let Some(book) = state.catalog.get(&id).await else {
         return not_found("No such cover");
     };
 
@@ -704,13 +702,13 @@ async fn serve_cover(state: Arc<AppState>, id: String, thumbnail: bool) -> Respo
 }
 
 /// Build a "Category" facet group linking to each category feed.
-fn category_facet(base: &str, catalog: &CatalogStore) -> Facet {
-    let facet_link = |category: Category| {
+async fn category_facet(base: &str, catalog: &CatalogStore) -> Facet {
+    let facet_link = |category: Category, count: u64| {
         Link::new(format!("{base}/opds/category/{}", category.slug()))
             .with_type(FEED_MEDIA_TYPE)
             .with_title(category.label())
             .with_properties(LinkProperties {
-                number_of_items: Some(catalog.count_category(category)),
+                number_of_items: Some(count),
                 ..Default::default()
             })
     };
@@ -718,8 +716,11 @@ fn category_facet(base: &str, catalog: &CatalogStore) -> Facet {
     Facet {
         metadata: Metadata::new("Category"),
         links: vec![
-            facet_link(Category::Fiction),
-            facet_link(Category::NonFiction),
+            facet_link(Category::Fiction, catalog.count_category(Category::Fiction).await),
+            facet_link(
+                Category::NonFiction,
+                catalog.count_category(Category::NonFiction).await,
+            ),
         ],
     }
 }
@@ -756,26 +757,26 @@ mod tests {
     const BASE: &str = "http://localhost:3000";
 
     /// An in-memory catalog store seeded with the sample books.
-    fn sample_store() -> Arc<CatalogStore> {
-        let store = CatalogStore::open_in_memory().unwrap();
-        store.reset_to_samples();
+    async fn sample_store() -> Arc<CatalogStore> {
+        let store = CatalogStore::open_in_memory().await.unwrap();
+        store.reset_to_samples().await;
         Arc::new(store)
     }
 
-    fn test_app() -> Router {
+    async fn test_app() -> Router {
         app(Arc::new(AppState {
             base_url: BASE.to_string(),
-            catalog: sample_store(),
+            catalog: sample_store().await,
             auth: None,
         }))
     }
 
-    fn test_app_with_auth() -> Router {
-        let store = auth::AuthStore::open_in_memory().unwrap();
-        store.add_user("admin", "secret", None).unwrap();
+    async fn test_app_with_auth() -> Router {
+        let store = auth::AuthStore::open_in_memory().await.unwrap();
+        store.add_user("admin", "secret", None).await.unwrap();
         app(Arc::new(AppState {
             base_url: BASE.to_string(),
-            catalog: sample_store(),
+            catalog: sample_store().await,
             auth: Some(Arc::new(store)),
         }))
     }
@@ -784,6 +785,7 @@ mod tests {
     /// (`Value::Null` if the body is not JSON).
     async fn get(uri: &str) -> (StatusCode, String, Value) {
         let response = test_app()
+            .await
             .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -804,6 +806,7 @@ mod tests {
     /// and the raw body bytes.
     async fn get_raw(uri: &str) -> (StatusCode, String, axum::http::HeaderMap, Vec<u8>) {
         let response = test_app()
+            .await
             .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -838,6 +841,7 @@ mod tests {
     #[tokio::test]
     async fn root_redirects_to_opds() {
         let response = test_app()
+            .await
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -1132,8 +1136,8 @@ mod tests {
     // A generated EPUB, when written to a directory and reconciled into the
     // store, is recognized and its metadata recovered — and a later reconcile
     // reflects removal.
-    #[test]
-    fn reconcile_reflects_add_and_remove() {
+    #[tokio::test]
+    async fn reconcile_reflects_add_and_remove() {
         use std::fs;
 
         let dir = std::env::temp_dir().join(format!("opds-scan-test-{}", std::process::id()));
@@ -1141,24 +1145,24 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
 
         // Reuse a sample book to synthesize a real EPUB on disk.
-        let store = CatalogStore::open_in_memory().unwrap();
-        store.reset_to_samples();
-        let book = store.get("moby-dick").unwrap();
+        let store = CatalogStore::open_in_memory().await.unwrap();
+        store.reset_to_samples().await;
+        let book = store.get("moby-dick").await.unwrap();
         fs::write(dir.join("first.epub"), assets::epub_bytes(&book)).unwrap();
 
         // Reconcile clears samples (removed by the caller) and picks up the file.
-        store.remove_sample_books();
-        store.reconcile_dir(&dir);
-        assert_eq!(store.count(), 1);
-        let found = &store.all()[0];
+        store.remove_sample_books().await;
+        store.reconcile_dir(&dir).await;
+        assert_eq!(store.count().await, 1);
+        let found = &store.all().await[0];
         assert_eq!(found.title, book.title);
         assert_eq!(found.author, book.author);
         assert!(matches!(found.source, BookSource::File { .. }));
 
         // Removing the file and reconciling drops the book.
         fs::remove_file(dir.join("first.epub")).unwrap();
-        store.reconcile_dir(&dir);
-        assert_eq!(store.count(), 0);
+        store.reconcile_dir(&dir).await;
+        assert_eq!(store.count().await, 0);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1182,21 +1186,24 @@ mod tests {
         assert!(assets::thumbnail(b"not an image", 160, 240).is_none());
     }
 
-    #[test]
-    fn auth_store_hashes_and_verifies() {
-        let store = auth::AuthStore::open_in_memory().unwrap();
-        store.add_user("alice", "correct horse", Some("Alice")).unwrap();
+    #[tokio::test]
+    async fn auth_store_hashes_and_verifies() {
+        let store = auth::AuthStore::open_in_memory().await.unwrap();
+        store
+            .add_user("alice", "correct horse", Some("Alice"))
+            .await
+            .unwrap();
 
-        assert_eq!(store.user_count(), 1);
-        assert!(store.verify("alice", "correct horse"));
-        assert!(!store.verify("alice", "wrong password"));
-        assert!(!store.verify("nobody", "correct horse"));
+        assert_eq!(store.user_count().await, 1);
+        assert!(store.verify("alice", "correct horse").await);
+        assert!(!store.verify("alice", "wrong password").await);
+        assert!(!store.verify("nobody", "correct horse").await);
 
         // add_user upserts: the password can be changed in place.
-        store.add_user("alice", "new passphrase", None).unwrap();
-        assert_eq!(store.user_count(), 1);
-        assert!(store.verify("alice", "new passphrase"));
-        assert!(!store.verify("alice", "correct horse"));
+        store.add_user("alice", "new passphrase", None).await.unwrap();
+        assert_eq!(store.user_count().await, 1);
+        assert!(store.verify("alice", "new passphrase").await);
+        assert!(!store.verify("alice", "correct horse").await);
     }
 
     #[test]
@@ -1210,6 +1217,7 @@ mod tests {
     #[tokio::test]
     async fn protected_catalog_challenges_without_credentials() {
         let response = test_app_with_auth()
+            .await
             .oneshot(Request::builder().uri("/opds").body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -1230,6 +1238,7 @@ mod tests {
     async fn protected_catalog_accepts_valid_credentials() {
         let credentials = base64::encode(b"admin:secret");
         let response = test_app_with_auth()
+            .await
             .oneshot(
                 Request::builder()
                     .uri("/opds")
@@ -1246,6 +1255,7 @@ mod tests {
     async fn protected_catalog_rejects_wrong_password() {
         let credentials = base64::encode(b"admin:wrong");
         let response = test_app_with_auth()
+            .await
             .oneshot(
                 Request::builder()
                     .uri("/opds")
@@ -1261,6 +1271,7 @@ mod tests {
     #[tokio::test]
     async fn auth_document_is_reachable_without_credentials() {
         let response = test_app_with_auth()
+            .await
             .oneshot(Request::builder().uri("/opds/auth").body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -1271,8 +1282,8 @@ mod tests {
     // Books in Fiction/ and Non-Fiction/ subfolders are found recursively and
     // categorized by their folder (the generated EPUBs carry no subjects, so
     // this specifically exercises the folder override).
-    #[test]
-    fn recursive_scan_categorizes_by_subfolder() {
+    #[tokio::test]
+    async fn recursive_scan_categorizes_by_subfolder() {
         use std::fs;
 
         let dir = std::env::temp_dir().join(format!("opds-recur-test-{}", std::process::id()));
@@ -1280,17 +1291,17 @@ mod tests {
         fs::create_dir_all(dir.join("Fiction")).unwrap();
         fs::create_dir_all(dir.join("Non-Fiction")).unwrap();
 
-        let samples = CatalogStore::open_in_memory().unwrap();
-        samples.reset_to_samples();
-        let fiction = samples.get("moby-dick").unwrap();
-        let nonfiction = samples.get("the-art-of-war").unwrap();
+        let samples = CatalogStore::open_in_memory().await.unwrap();
+        samples.reset_to_samples().await;
+        let fiction = samples.get("moby-dick").await.unwrap();
+        let nonfiction = samples.get("the-art-of-war").await.unwrap();
         fs::write(dir.join("Fiction/a.epub"), assets::epub_bytes(&fiction)).unwrap();
         fs::write(dir.join("Non-Fiction/b.epub"), assets::epub_bytes(&nonfiction)).unwrap();
 
-        let store = CatalogStore::open_in_memory().unwrap();
-        store.reconcile_dir(&dir);
-        assert_eq!(store.count(), 2);
-        for book in store.all() {
+        let store = CatalogStore::open_in_memory().await.unwrap();
+        store.reconcile_dir(&dir).await;
+        assert_eq!(store.count().await, 2);
+        for book in store.all().await {
             if book.title.contains("Moby") {
                 assert_eq!(book.category, Category::Fiction);
             } else if book.title.contains("Art of War") {

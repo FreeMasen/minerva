@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, file_path, title, author, language, description, modified,\n                    category, price_usd, lendable, cover_zip_path, cover_media_type\n             FROM books ORDER BY modified DESC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "file_path",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "title",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "author",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "language",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "modified",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "category",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "price_usd",
+        "ordinal": 8,
+        "type_info": "Float"
+      },
+      {
+        "name": "lendable",
+        "ordinal": 9,
+        "type_info": "Integer"
+      },
+      {
+        "name": "cover_zip_path",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "cover_media_type",
+        "ordinal": 11,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "a22e0e0e22c24c43f55dd42b5d51b37fb616f0d4a877070cbcf7af4799b73bf3"
+}

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT file_mtime FROM books WHERE file_path = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "file_mtime",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "fb21bcd4be4b110dd6c1bfd5811a23cab3815be27bd6d78bdb24aaba952f431d"
+}

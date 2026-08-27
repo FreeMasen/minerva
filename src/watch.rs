@@ -1,9 +1,10 @@
 //! Watch the library directory and keep the SQLite catalog in sync.
 //!
 //! A background thread receives filesystem events and, after coalescing a burst
-//! (a file copy can emit many), updates the catalog store. File-level changes
-//! are applied surgically — the affected EPUB is re-read and upserted, or its
-//! row deleted — while directory-level changes trigger a full reconcile.
+//! (a file copy can emit many), updates the catalog store. The store is async,
+//! so the thread drives it with a runtime handle. File-level changes are applied
+//! surgically — the affected EPUB is re-read and upserted, or its row deleted —
+//! while directory-level changes trigger a full reconcile.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -12,6 +13,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use notify::{RecursiveMode, Watcher};
+use tokio::runtime::Handle;
 
 use crate::catalog::{self, book_from_file};
 use crate::library::CatalogStore;
@@ -19,10 +21,10 @@ use crate::library::CatalogStore;
 /// How long to wait for the event stream to go quiet before reacting.
 const DEBOUNCE: Duration = Duration::from_millis(300);
 
-/// Spawn the watcher thread over `dir`, updating `store` as files change.
-/// Watching failures are logged but non-fatal: the server keeps serving the
-/// catalog reconciled at startup.
-pub fn spawn(dir: PathBuf, store: Arc<CatalogStore>) {
+/// Spawn the watcher thread over `dir`, updating `store` (via `handle`) as files
+/// change. Watching failures are logged but non-fatal: the server keeps serving
+/// the catalog reconciled at startup.
+pub fn spawn(dir: PathBuf, store: Arc<CatalogStore>, handle: Handle) {
     std::thread::spawn(move || {
         let (tx, rx) = mpsc::channel();
 
@@ -48,8 +50,9 @@ pub fn spawn(dir: PathBuf, store: Arc<CatalogStore>) {
                 batch.push(event);
             }
 
-            if apply_batch(&dir, &store, batch) {
-                tracing::info!(count = store.count(), "catalog updated after filesystem change");
+            if handle.block_on(apply_batch(&dir, &store, batch)) {
+                let count = handle.block_on(store.count());
+                tracing::info!(count, "catalog updated after filesystem change");
             }
         }
 
@@ -60,7 +63,7 @@ pub fn spawn(dir: PathBuf, store: Arc<CatalogStore>) {
 
 /// Apply a coalesced batch of events to the store. Returns whether anything
 /// changed.
-fn apply_batch(
+async fn apply_batch(
     dir: &PathBuf,
     store: &CatalogStore,
     batch: Vec<Result<notify::Event, notify::Error>>,
@@ -82,7 +85,7 @@ fn apply_batch(
             } else if path.is_dir() {
                 // A directory appeared or was renamed into place.
                 full_reconcile = true;
-            } else if !path.exists() && store.has_books_under(&path) {
+            } else if !path.exists() && store.has_books_under(&path).await {
                 // A directory that held books was removed.
                 full_reconcile = true;
             }
@@ -91,7 +94,7 @@ fn apply_batch(
     }
 
     if full_reconcile {
-        store.reconcile_dir(dir);
+        store.reconcile_dir(dir).await;
         return true;
     }
 
@@ -108,17 +111,17 @@ fn apply_batch(
                         .ok()
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                         .map(|d| d.as_secs() as i64);
-                    store.upsert_file(&book_from_file(dir, path, meta), mtime);
+                    store.upsert_file(&book_from_file(dir, path, meta), mtime).await;
                 }
                 Err(err) => {
                     // Treat an unreadable/half-written file as absent for now; a
                     // later event once the write settles will re-add it.
                     tracing::warn!(%err, path = %path.display(), "dropping unreadable EPUB");
-                    store.delete_by_path(&path);
+                    store.delete_by_path(&path).await;
                 }
             }
         } else {
-            store.delete_by_path(&path);
+            store.delete_by_path(&path).await;
         }
     }
 

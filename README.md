@@ -61,7 +61,7 @@ no cover).
 | `GET /opds/buy/{id}`           | Advertised for spec completeness; returns 501 (no store).|
 | `GET /opds/borrow/{id}`        | Advertised for lendable titles; returns 501 (no lending).|
 | `GET /opds/covers/{id}.svg`    | Generated SVG cover (`{id}-thumb.svg` for the thumbnail).|
-| `GET /opds/auth`               | Authentication document (when `OPDS_AUTH` is set).      |
+| `GET /opds/auth`               | Authentication document (when `OPDS_AUTH_DB` is set).   |
 
 ## What's implemented
 
@@ -103,7 +103,21 @@ Integration tests drive the fully-wired router (via `tower::ServiceExt::oneshot`
 and cover the root feed, pagination, category filtering, publication documents,
 search, EPUB/cover/buy asset endpoints, and 404s. A directory-scan test writes a
 generated EPUB to a temp dir and confirms it is picked up and then dropped after
-removal.
+removal. Tests run against an in-memory SQLite database.
+
+## Development
+
+Data access uses [sqlx](https://github.com/launchbadge/sqlx) with compile-time
+checked queries. A checked-in offline cache (`.sqlx/`) lets the project build
+without a database, so `cargo build` and `cargo test` work out of the box.
+
+If you change any SQL (or the schema in `migrations/`), regenerate the cache:
+
+```sh
+export DATABASE_URL=sqlite:dev.db
+sqlx database create && sqlx migrate run   # one-time: create the dev database
+cargo sqlx prepare                         # refresh .sqlx/ — commit the result
+```
 
 ## Layout
 
@@ -111,6 +125,8 @@ removal.
 - `src/catalog.rs` — the `Book`/`Category` domain types, the sample set, and
   EPUB scanning helpers.
 - `src/library.rs` — the SQLite-backed catalog store (queries + reconciliation).
+- `src/db.rs` — the sqlx connection pool + migrations.
+- `migrations/` — SQL schema migrations (applied at startup).
 - `src/epub.rs` — reads metadata and cover images out of EPUB files.
 - `src/assets.rs` — on-the-fly EPUB and SVG cover generation (for samples and
   cover fallbacks).
