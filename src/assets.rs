@@ -39,8 +39,8 @@ const CONTAINER_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 "#;
 
 fn content_opf(book: &Book) -> String {
-    let title = xml_escape(book.title);
-    let author = xml_escape(book.author);
+    let title = xml_escape(&book.title);
+    let author = xml_escape(&book.author);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id">
@@ -61,13 +61,13 @@ fn content_opf(book: &Book) -> String {
 </package>
 "#,
         id = book.id,
-        language = book.language,
-        modified = book.modified,
+        language = book.language.as_deref().unwrap_or("en"),
+        modified = book.modified.as_deref().unwrap_or("1970-01-01T00:00:00Z"),
     )
 }
 
 fn nav_xhtml(book: &Book) -> String {
-    let title = xml_escape(book.title);
+    let title = xml_escape(&book.title);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
@@ -84,9 +84,9 @@ fn nav_xhtml(book: &Book) -> String {
 }
 
 fn chapter_xhtml(book: &Book) -> String {
-    let title = xml_escape(book.title);
-    let author = xml_escape(book.author);
-    let description = xml_escape(book.description);
+    let title = xml_escape(&book.title);
+    let author = xml_escape(&book.author);
+    let description = xml_escape(book.description.as_deref().unwrap_or_default());
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml">
@@ -139,8 +139,8 @@ pub fn epub_bytes(book: &Book) -> Vec<u8> {
 /// Render an SVG placeholder cover for `book` at the given pixel dimensions,
 /// showing the title and author on a solid background.
 pub fn cover_svg(book: &Book, width: u32, height: u32) -> String {
-    let title = xml_escape(book.title);
-    let author = xml_escape(book.author);
+    let title = xml_escape(&book.title);
+    let author = xml_escape(&book.author);
     // Deterministically pick a background hue from the id so covers differ.
     let hue = book.id.bytes().fold(0u32, |acc, b| acc + b as u32) % 360;
     format!(

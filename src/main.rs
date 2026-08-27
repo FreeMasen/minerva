@@ -4,12 +4,19 @@
 //! (<https://specs.opds.io/opds-2.0.html>): a root navigation feed, acquisition
 //! feeds (all publications and per-category), facets, full-text search via a
 //! templated link, and individual publication documents.
+//!
+//! The catalog is either the built-in sample set or a directory of EPUB files
+//! (set `OPDS_LIBRARY_DIR`) that is scanned for metadata and covers and kept in
+//! sync as files are added or removed.
 
 mod assets;
 mod catalog;
+mod epub;
 mod model;
+mod watch;
 
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 
 use axum::{
     Router,
@@ -20,14 +27,22 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::catalog::{Book, Category};
+use crate::catalog::{Book, BookSource, Catalog, Category};
 use crate::model::*;
 
-/// Shared application configuration.
-#[derive(Clone)]
+/// Shared application state.
 struct AppState {
     /// The externally-visible base URL used to build absolute hrefs.
     base_url: String,
+    /// The current catalog, hot-swapped by the file watcher on changes.
+    catalog: RwLock<Arc<Catalog>>,
+}
+
+impl AppState {
+    /// A cheap, point-in-time snapshot of the catalog for a request to read.
+    fn snapshot(&self) -> Arc<Catalog> {
+        self.catalog.read().unwrap().clone()
+    }
 }
 
 #[tokio::main]
@@ -41,7 +56,30 @@ async fn main() {
 
     let base_url =
         std::env::var("OPDS_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
-    let state = Arc::new(AppState { base_url });
+
+    // A configured, non-empty OPDS_LIBRARY_DIR selects the filesystem catalog;
+    // otherwise we serve the built-in sample set.
+    let library_dir = std::env::var_os("OPDS_LIBRARY_DIR")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty());
+
+    let catalog = match &library_dir {
+        Some(dir) => Catalog::from_dir(dir),
+        None => {
+            tracing::info!("OPDS_LIBRARY_DIR unset; serving the built-in sample catalog");
+            Catalog::sample()
+        }
+    };
+
+    let state = Arc::new(AppState {
+        base_url,
+        catalog: RwLock::new(Arc::new(catalog)),
+    });
+
+    // Reflect additions/removals in the library directory as they happen.
+    if let Some(dir) = library_dir {
+        watch::spawn(dir, state.clone());
+    }
 
     let addr = "0.0.0.0:3000";
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
@@ -61,7 +99,8 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/opds/search", get(search))
         .route("/opds/download/{file}", get(download))
         .route("/opds/buy/{id}", get(buy))
-        .route("/opds/covers/{file}", get(cover))
+        .route("/opds/covers/{id}", get(cover))
+        .route("/opds/covers/{id}/thumb", get(cover_thumb))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -160,7 +199,8 @@ async fn all_publications(
     Query(params): Query<PageParams>,
 ) -> impl IntoResponse {
     let base = &state.base_url;
-    let books = catalog::books();
+    let catalog = state.snapshot();
+    let books = catalog.books();
     let total = books.len() as u64;
 
     // At least one page even when the catalog is empty.
@@ -209,7 +249,7 @@ async fn all_publications(
     feed.metadata.items_per_page = Some(PAGE_SIZE);
     feed.metadata.current_page = Some(page);
     feed.publications = page_books.iter().map(|b| b.to_publication(base)).collect();
-    feed.facets = vec![category_facet(base, &books)];
+    feed.facets = vec![category_facet(base, books)];
 
     Opds::feed(feed)
 }
@@ -225,8 +265,10 @@ async fn category_feed(
         return not_found("No such category");
     };
 
-    let books: Vec<Book> = catalog::books()
-        .into_iter()
+    let catalog = state.snapshot();
+    let books: Vec<&Book> = catalog
+        .books()
+        .iter()
         .filter(|b| b.category == category)
         .collect();
 
@@ -256,7 +298,8 @@ async fn publication(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Response {
-    match catalog::book(&id) {
+    let catalog = state.snapshot();
+    match catalog.get(&id) {
         Some(book) => Opds::publication(book.to_publication(&state.base_url)).into_response(),
         None => not_found("No such publication"),
     }
@@ -276,15 +319,21 @@ async fn search(
     let base = &state.base_url;
     let needle = params.query.trim().to_lowercase();
 
-    let matches: Vec<Book> = if needle.is_empty() {
+    let catalog = state.snapshot();
+    let matches: Vec<&Book> = if needle.is_empty() {
         Vec::new()
     } else {
-        catalog::books()
-            .into_iter()
+        catalog
+            .books()
+            .iter()
             .filter(|b| {
                 b.title.to_lowercase().contains(&needle)
                     || b.author.to_lowercase().contains(&needle)
-                    || b.description.to_lowercase().contains(&needle)
+                    || b.description
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .contains(&needle)
             })
             .collect()
     };
@@ -311,34 +360,61 @@ async fn search(
 }
 
 /// Serve the open-access EPUB for a publication. The path carries the filename
-/// (`{id}.epub`); we strip the extension to recover the book id.
-async fn download(Path(file): Path<String>) -> Response {
-    let id = file.strip_suffix(".epub").unwrap_or(&file);
-    match catalog::book(id) {
-        Some(book) if book.price_usd.is_none() => {
-            let bytes = assets::epub_bytes(&book);
-            (
-                [
-                    (header::CONTENT_TYPE, "application/epub+zip".to_string()),
-                    (
-                        header::CONTENT_DISPOSITION,
-                        format!("attachment; filename=\"{id}.epub\""),
-                    ),
-                ],
-                bytes,
-            )
-                .into_response()
+/// (`{id}.epub`); we strip the extension to recover the book id. Sample books
+/// get a generated EPUB; file-backed books stream their bytes from disk.
+async fn download(State(state): State<Arc<AppState>>, Path(file): Path<String>) -> Response {
+    let id = file.strip_suffix(".epub").unwrap_or(&file).to_string();
+    let catalog = state.snapshot();
+
+    let Some(book) = catalog.get(&id) else {
+        return not_found("No such publication");
+    };
+
+    match &book.source {
+        BookSource::Sample => {
+            if book.price_usd.is_some() {
+                return not_found("This publication is not available for open-access download");
+            }
+            epub_response(&format!("{id}.epub"), assets::epub_bytes(book))
         }
-        // A paid title is not available as a free download.
-        Some(_) => not_found("This publication is not available for open-access download"),
-        None => not_found("No such publication"),
+        BookSource::File { path } => {
+            let filename = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("book.epub")
+                .to_string();
+            let path = path.clone();
+            match tokio::fs::read(&path).await {
+                Ok(bytes) => epub_response(&filename, bytes),
+                Err(err) => {
+                    tracing::error!(%err, path = %path.display(), "failed to read EPUB file");
+                    not_found("Publication file is unavailable")
+                }
+            }
+        }
     }
+}
+
+/// Build an EPUB download response with an attachment filename.
+fn epub_response(filename: &str, bytes: Vec<u8>) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "application/epub+zip".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
 }
 
 /// A minimal "buy" landing page for a paid publication. A real store would
 /// begin a purchase flow here; this returns a human-readable placeholder.
-async fn buy(Path(id): Path<String>) -> Response {
-    match catalog::book(&id) {
+async fn buy(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let catalog = state.snapshot();
+    match catalog.get(&id) {
         Some(book) => {
             let price = book
                 .price_usd
@@ -360,26 +436,45 @@ async fn buy(Path(id): Path<String>) -> Response {
     }
 }
 
-/// Serve a generated SVG cover. The filename is `{id}.svg` for the full cover
-/// or `{id}-thumb.svg` for the thumbnail.
-async fn cover(Path(file): Path<String>) -> Response {
-    let stem = file.strip_suffix(".svg").unwrap_or(&file);
-    let (id, width, height) = match stem.strip_suffix("-thumb") {
-        Some(id) => (id, 160, 240),
-        None => (stem, 800, 1200),
+/// Serve a book's full-size cover.
+async fn cover(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    serve_cover(state, id, false).await
+}
+
+/// Serve a book's thumbnail cover.
+async fn cover_thumb(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    serve_cover(state, id, true).await
+}
+
+/// Serve a cover image: the real embedded image for file-backed books, or a
+/// generated SVG placeholder when there is no embedded cover (or it can't be
+/// read).
+async fn serve_cover(state: Arc<AppState>, id: String, thumbnail: bool) -> Response {
+    let catalog = state.snapshot();
+    let Some(book) = catalog.get(&id) else {
+        return not_found("No such cover");
     };
 
-    match catalog::book(id) {
-        Some(book) => {
-            let svg = assets::cover_svg(&book, width, height);
-            (
-                [(header::CONTENT_TYPE, "image/svg+xml")],
-                svg,
-            )
-                .into_response()
+    if let (BookSource::File { path }, Some(cover)) = (&book.source, &book.cover) {
+        let path = path.clone();
+        let zip_path = cover.zip_path.clone();
+        let media_type = cover.media_type.clone();
+        match tokio::task::spawn_blocking(move || epub::read_entry(&path, &zip_path)).await {
+            Ok(Ok(bytes)) => {
+                return ([(header::CONTENT_TYPE, media_type)], bytes).into_response();
+            }
+            Ok(Err(err)) => {
+                tracing::warn!(%err, id, "failed to read embedded cover; using placeholder");
+            }
+            Err(err) => {
+                tracing::error!(%err, "cover read task panicked");
+            }
         }
-        None => not_found("No such cover"),
     }
+
+    let (width, height) = if thumbnail { (160, 240) } else { (800, 1200) };
+    let svg = assets::cover_svg(book, width, height);
+    ([(header::CONTENT_TYPE, "image/svg+xml")], svg).into_response()
 }
 
 /// Build a "Category" facet group linking to each category feed.
@@ -441,6 +536,7 @@ mod tests {
     fn test_app() -> Router {
         app(Arc::new(AppState {
             base_url: BASE.to_string(),
+            catalog: RwLock::new(Arc::new(Catalog::sample())),
         }))
     }
 
@@ -665,14 +761,14 @@ mod tests {
 
     #[tokio::test]
     async fn cover_and_thumbnail_render_svg() {
-        let (status, content_type, _, bytes) = get_raw("/opds/covers/moby-dick.svg").await;
+        let (status, content_type, _, bytes) = get_raw("/opds/covers/moby-dick").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(content_type, "image/svg+xml");
         let body = String::from_utf8(bytes).unwrap();
         assert!(body.contains("<svg"));
         assert!(body.contains(r#"width="800""#));
 
-        let (status, _, _, bytes) = get_raw("/opds/covers/moby-dick-thumb.svg").await;
+        let (status, _, _, bytes) = get_raw("/opds/covers/moby-dick/thumb").await;
         assert_eq!(status, StatusCode::OK);
         let body = String::from_utf8(bytes).unwrap();
         assert!(body.contains(r#"width="160""#));
@@ -680,7 +776,37 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_cover_404s() {
-        let (status, _, _, _) = get_raw("/opds/covers/nope.svg").await;
+        let (status, _, _, _) = get_raw("/opds/covers/nope").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // A generated EPUB, when written to a directory and scanned back, is
+    // recognized and its metadata recovered — and a rescan reflects removal.
+    #[test]
+    fn scans_directory_and_reflects_add_and_remove() {
+        use std::fs;
+
+        let dir = std::env::temp_dir().join(format!("opds-scan-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // Reuse a sample book to synthesize a real EPUB on disk.
+        let sample = Catalog::sample();
+        let book = &sample.books()[0];
+        fs::write(dir.join("first.epub"), assets::epub_bytes(book)).unwrap();
+
+        let scanned = Catalog::from_dir(&dir);
+        assert_eq!(scanned.books().len(), 1);
+        let found = &scanned.books()[0];
+        assert_eq!(found.title, book.title);
+        assert_eq!(found.author, book.author);
+        assert!(matches!(found.source, BookSource::File { .. }));
+
+        // Removing the file and rescanning drops the book.
+        fs::remove_file(dir.join("first.epub")).unwrap();
+        let scanned = Catalog::from_dir(&dir);
+        assert!(scanned.books().is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
