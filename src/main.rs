@@ -63,11 +63,16 @@ async fn main() {
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty());
 
-    let catalog = match &library_dir {
-        Some(dir) => Catalog::from_dir(dir),
+    // For a library directory, scan once into a path-keyed index that both the
+    // initial catalog and the watcher share; otherwise use the sample catalog.
+    let (catalog, library) = match &library_dir {
+        Some(dir) => {
+            let index = catalog::scan(dir);
+            (Catalog::from_index(&index), Some((dir.clone(), index)))
+        }
         None => {
             tracing::info!("OPDS_LIBRARY_DIR unset; serving the built-in sample catalog");
-            Catalog::sample()
+            (Catalog::sample(), None)
         }
     };
 
@@ -77,8 +82,8 @@ async fn main() {
     });
 
     // Reflect additions/removals in the library directory as they happen.
-    if let Some(dir) = library_dir {
-        watch::spawn(dir, state.clone());
+    if let Some((dir, index)) = library {
+        watch::spawn(dir, index, state.clone());
     }
 
     let addr = "0.0.0.0:3000";
@@ -918,6 +923,39 @@ mod tests {
         fs::remove_file(dir.join("first.epub")).unwrap();
         let scanned = Catalog::from_dir(&dir);
         assert!(scanned.books().is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // Books in Fiction/ and Non-Fiction/ subfolders are found recursively and
+    // categorized by their folder (the generated EPUBs carry no subjects, so
+    // this specifically exercises the folder override).
+    #[test]
+    fn recursive_scan_categorizes_by_subfolder() {
+        use std::fs;
+
+        let dir = std::env::temp_dir().join(format!("opds-recur-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("Fiction")).unwrap();
+        fs::create_dir_all(dir.join("Non-Fiction")).unwrap();
+
+        let sample = Catalog::sample();
+        let fiction = sample.get("moby-dick").unwrap();
+        let nonfiction = sample.get("the-art-of-war").unwrap();
+        fs::write(dir.join("Fiction/a.epub"), assets::epub_bytes(fiction)).unwrap();
+        fs::write(dir.join("Non-Fiction/b.epub"), assets::epub_bytes(nonfiction)).unwrap();
+
+        let cat = Catalog::from_dir(&dir);
+        assert_eq!(cat.books().len(), 2);
+        for book in cat.books() {
+            if book.title.contains("Moby") {
+                assert_eq!(book.category, Category::Fiction);
+            } else if book.title.contains("Art of War") {
+                assert_eq!(book.category, Category::NonFiction);
+            } else {
+                panic!("unexpected book: {}", book.title);
+            }
+        }
 
         let _ = fs::remove_dir_all(&dir);
     }

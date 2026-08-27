@@ -70,14 +70,44 @@ impl Category {
         }
     }
 
+    /// Derive a category from a book's location: a file directly under a
+    /// top-level `Fiction` or `Non-Fiction` (a.k.a. `nonfiction`) subfolder of
+    /// the library is categorized accordingly. Returns `None` when the layout
+    /// doesn't indicate a category (e.g. the file sits at the library root).
+    fn from_path(root: &Path, path: &Path) -> Option<Category> {
+        let rel = path.strip_prefix(root).ok()?;
+        // Require an intervening directory component (dir + filename).
+        if rel.components().count() < 2 {
+            return None;
+        }
+        let top = rel.components().next()?.as_os_str().to_str()?.to_lowercase();
+        match top.as_str() {
+            "fiction" => Some(Category::Fiction),
+            "non-fiction" | "nonfiction" => Some(Category::NonFiction),
+            _ => None,
+        }
+    }
+
     /// Classify a book from its Dublin Core subjects. EPUBs don't carry our
     /// two-way taxonomy, so this is a best-effort heuristic that defaults to
     /// non-fiction when the subjects are unhelpful.
     fn classify(subjects: &[String]) -> Category {
         let joined = subjects.join(" ").to_lowercase();
-        if joined.contains("nonfiction") || joined.contains("non-fiction") {
+        const NONFICTION_HINTS: [&str; 7] = [
+            "nonfiction",
+            "non-fiction",
+            "biography",
+            "history",
+            "science",
+            "reference",
+            "self-help",
+        ];
+        if NONFICTION_HINTS.iter().any(|h| joined.contains(h)) {
             Category::NonFiction
-        } else if joined.contains("fiction") {
+        } else if joined.contains("fiction")
+            || joined.contains("novel")
+            || joined.contains("stories")
+        {
             Category::Fiction
         } else {
             Category::NonFiction
@@ -92,8 +122,25 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    /// Build a catalog from a set of books, ordering them by title and assigning
+    /// stable, unique ids (disambiguating any that collide).
     fn from_books(mut books: Vec<Book>) -> Self {
-        books.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+        books.sort_by(|a, b| {
+            a.title
+                .to_lowercase()
+                .cmp(&b.title.to_lowercase())
+                .then_with(|| a.id.cmp(&b.id))
+        });
+
+        let mut seen: HashMap<String, u32> = HashMap::new();
+        for book in &mut books {
+            let count = seen.entry(book.id.clone()).or_insert(0);
+            if *count > 0 {
+                book.id = format!("{}-{}", book.id, *count + 1);
+            }
+            *count += 1;
+        }
+
         let by_id = books
             .iter()
             .enumerate()
@@ -117,72 +164,95 @@ impl Catalog {
         Self::from_books(sample_books())
     }
 
-    /// Scan a directory of `.epub` files and build a catalog from their embedded
-    /// metadata. Files that cannot be read or parsed are skipped with a warning,
-    /// so a half-written file (mid-copy) simply doesn't appear until it's whole.
+    /// Build a catalog from a path-keyed index of books (as maintained by the
+    /// file watcher for incremental updates).
+    pub fn from_index(index: &HashMap<PathBuf, Book>) -> Self {
+        Self::from_books(index.values().cloned().collect())
+    }
+
+    /// Recursively scan a directory of `.epub` files and build a catalog from
+    /// their embedded metadata. A convenience wrapper over [`scan`] +
+    /// [`Catalog::from_index`], used in tests.
+    #[allow(dead_code)]
     pub fn from_dir(dir: &Path) -> Self {
-        let entries = match std::fs::read_dir(dir) {
+        Self::from_index(&scan(dir))
+    }
+}
+
+/// Whether a path names an EPUB file (by extension).
+pub(crate) fn is_epub(path: &Path) -> bool {
+    path.extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("epub"))
+        .unwrap_or(false)
+}
+
+/// Recursively collect the `.epub` files under `root`, sorted. Symlinks are not
+/// followed, so symlinked directories can't cause cycles.
+fn epub_paths(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(err) => {
-                tracing::error!(%err, dir = %dir.display(), "cannot read library directory");
-                return Self::from_books(Vec::new());
+                tracing::warn!(%err, dir = %dir.display(), "cannot read directory");
+                continue;
             }
         };
-
-        let mut paths: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| {
-                p.extension()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.eq_ignore_ascii_case("epub"))
-                    .unwrap_or(false)
-            })
-            .collect();
-        paths.sort();
-
-        let mut books = Vec::new();
-        let mut used_ids: HashMap<String, u32> = HashMap::new();
-
-        for path in paths {
-            let meta = match epub::read_meta(&path) {
-                Ok(meta) => meta,
-                Err(err) => {
-                    tracing::warn!(%err, path = %path.display(), "skipping unreadable EPUB");
-                    continue;
-                }
-            };
-
-            let stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("book");
-            let base = slugify(meta.title.as_deref().unwrap_or(stem));
-
-            // Disambiguate ids that slugify to the same value.
-            let seen = used_ids.entry(base.clone()).or_insert(0);
-            let id = if *seen == 0 {
-                base.clone()
-            } else {
-                format!("{base}-{}", *seen + 1)
-            };
-            *seen += 1;
-
-            books.push(Book {
-                id,
-                title: meta.title.unwrap_or_else(|| stem.to_string()),
-                author: meta.author.unwrap_or_else(|| "Unknown Author".to_string()),
-                language: meta.language,
-                description: meta.description,
-                modified: meta.modified,
-                category: Category::classify(&meta.subjects),
-                price_usd: None,
-                source: BookSource::File { path },
-                cover: meta.cover,
-            });
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if is_dir {
+                stack.push(path);
+            } else if is_epub(&path) {
+                out.push(path);
+            }
         }
+    }
 
-        tracing::info!(count = books.len(), dir = %dir.display(), "scanned library");
-        Self::from_books(books)
+    out.sort();
+    out
+}
+
+/// Scan `dir` recursively and return a path-keyed index of the books found.
+/// Files that cannot be read or parsed are skipped with a warning, so a
+/// half-written file (mid-copy) simply doesn't appear until it's whole.
+pub fn scan(dir: &Path) -> HashMap<PathBuf, Book> {
+    let mut index = HashMap::new();
+    for path in epub_paths(dir) {
+        match epub::read_meta(&path) {
+            Ok(meta) => {
+                index.insert(path.clone(), book_from_file(dir, path, meta));
+            }
+            Err(err) => {
+                tracing::warn!(%err, path = %path.display(), "skipping unreadable EPUB");
+            }
+        }
+    }
+    tracing::info!(count = index.len(), dir = %dir.display(), "scanned library");
+    index
+}
+
+/// Build a [`Book`] from a scanned EPUB file and its metadata. The id is a
+/// provisional slug (deduplicated later by [`Catalog::from_books`]); the
+/// category prefers the top-level library subfolder, falling back to subjects.
+pub(crate) fn book_from_file(root: &Path, path: PathBuf, meta: epub::EpubMeta) -> Book {
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("book");
+    let category = Category::from_path(root, &path).unwrap_or_else(|| Category::classify(&meta.subjects));
+
+    Book {
+        id: slugify(meta.title.as_deref().unwrap_or(stem)),
+        title: meta.title.unwrap_or_else(|| stem.to_string()),
+        author: meta.author.unwrap_or_else(|| "Unknown Author".to_string()),
+        language: meta.language,
+        description: meta.description,
+        modified: meta.modified,
+        category,
+        price_usd: None,
+        source: BookSource::File { path },
+        cover: meta.cover,
     }
 }
 
