@@ -147,9 +147,13 @@ async fn root_redirect() -> Response {
     axum::response::Redirect::temporary("/opds").into_response()
 }
 
-/// The root navigation feed: entry point that links to the browsable sections.
+/// The root feed: the catalog entry point. It carries a top-level navigation
+/// link, a "New Publications" group previewing recent titles, and a "Browse by
+/// Category" navigation group.
 async fn root_feed(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let base = &state.base_url;
+    let catalog = state.snapshot();
+    let books = catalog.books();
 
     let mut feed = Feed::new("Example OPDS Catalog", format!("{base}/opds"))
         .with_link(
@@ -158,8 +162,9 @@ async fn root_feed(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 .with_type(FEED_MEDIA_TYPE),
         )
         .with_link(
-            // A templated search link, per the OPDS search convention.
-            Link::new(format!("{base}/opds/search{{?query}}"))
+            // A templated search link supporting a general query plus optional
+            // author/title fields, per the OPDS search convention.
+            Link::new(format!("{base}/opds/search{{?query,author,title}}"))
                 .with_rel("search")
                 .with_type(FEED_MEDIA_TYPE)
                 .with_title("Search the catalog")
@@ -174,15 +179,45 @@ async fn root_feed(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             .with_rel("http://opds-spec.org/sort/new")
             .with_type(FEED_MEDIA_TYPE)
             .with_title("All Publications"),
-        Link::new(format!("{base}/opds/category/fiction"))
-            .with_rel("subsection")
-            .with_type(FEED_MEDIA_TYPE)
-            .with_title("Fiction"),
-        Link::new(format!("{base}/opds/category/nonfiction"))
-            .with_rel("subsection")
-            .with_type(FEED_MEDIA_TYPE)
-            .with_title("Non-Fiction"),
     ];
+
+    // A "New Publications" group: a short preview of publications whose `self`
+    // link resolves to the full acquisition feed.
+    let mut new_meta = Metadata::new("New Publications");
+    new_meta.number_of_items = Some(books.len() as u64);
+    let new_group = Group {
+        metadata: new_meta,
+        links: vec![
+            Link::new(format!("{base}/opds/all"))
+                .with_rel("self")
+                .with_type(FEED_MEDIA_TYPE),
+        ],
+        navigation: Vec::new(),
+        publications: books
+            .iter()
+            .take(PAGE_SIZE as usize)
+            .map(|b| b.to_publication(base))
+            .collect(),
+    };
+
+    // A "Browse by Category" group: a navigation collection of category feeds.
+    let browse_group = Group {
+        metadata: Metadata::new("Browse by Category"),
+        links: Vec::new(),
+        navigation: vec![
+            Link::new(format!("{base}/opds/category/fiction"))
+                .with_rel("subsection")
+                .with_type(FEED_MEDIA_TYPE)
+                .with_title("Fiction"),
+            Link::new(format!("{base}/opds/category/nonfiction"))
+                .with_rel("subsection")
+                .with_type(FEED_MEDIA_TYPE)
+                .with_title("Non-Fiction"),
+        ],
+        publications: Vec::new(),
+    };
+
+    feed.groups = vec![new_group, browse_group];
 
     Opds::feed(feed)
 }
@@ -307,47 +342,61 @@ async fn publication(
 
 #[derive(Debug, Deserialize)]
 struct SearchParams {
+    /// A general query matched against title, author and description.
     #[serde(default)]
     query: String,
+    /// An optional filter matched against the author only.
+    author: Option<String>,
+    /// An optional filter matched against the title only.
+    title: Option<String>,
 }
 
-/// A search feed: returns publications whose title, author or description match.
+/// A search feed. `query` matches title/author/description; the optional
+/// `author` and `title` fields further constrain the results (all supplied
+/// terms must match).
 async fn search(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchParams>,
 ) -> impl IntoResponse {
     let base = &state.base_url;
-    let needle = params.query.trim().to_lowercase();
+
+    let query = params.query.trim().to_lowercase();
+    let author = params.author.as_deref().unwrap_or_default().trim().to_lowercase();
+    let title = params.title.as_deref().unwrap_or_default().trim().to_lowercase();
 
     let catalog = state.snapshot();
-    let matches: Vec<&Book> = if needle.is_empty() {
+    let matches: Vec<&Book> = if query.is_empty() && author.is_empty() && title.is_empty() {
         Vec::new()
     } else {
         catalog
             .books()
             .iter()
             .filter(|b| {
-                b.title.to_lowercase().contains(&needle)
-                    || b.author.to_lowercase().contains(&needle)
+                let query_ok = query.is_empty()
+                    || b.title.to_lowercase().contains(&query)
+                    || b.author.to_lowercase().contains(&query)
                     || b.description
                         .as_deref()
                         .unwrap_or_default()
                         .to_lowercase()
-                        .contains(&needle)
+                        .contains(&query);
+                let author_ok = author.is_empty() || b.author.to_lowercase().contains(&author);
+                let title_ok = title.is_empty() || b.title.to_lowercase().contains(&title);
+                query_ok && author_ok && title_ok
             })
             .collect()
     };
 
-    let self_href = format!(
-        "{base}/opds/search?query={}",
-        urlencode(&params.query)
-    );
+    // Echo the supplied parameters back in the self link.
+    let mut self_href = format!("{base}/opds/search?query={}", urlencode(&params.query));
+    if let Some(author) = &params.author {
+        self_href.push_str(&format!("&author={}", urlencode(author)));
+    }
+    if let Some(title) = &params.title {
+        self_href.push_str(&format!("&title={}", urlencode(title)));
+    }
 
-    let mut feed = Feed::new(
-        format!("Search results for \"{}\"", params.query),
-        self_href,
-    )
-    .with_link(
+    let mut feed = Feed::new("Search results", self_href).with_link(
         Link::new(format!("{base}/opds"))
             .with_rel("start")
             .with_type(FEED_MEDIA_TYPE),
@@ -620,7 +669,73 @@ mod tests {
             .find(|l| l["rel"] == "search")
             .expect("a search link");
         assert_eq!(search["templated"], true);
-        assert_eq!(search["href"], format!("{BASE}/opds/search{{?query}}"));
+        assert_eq!(
+            search["href"],
+            format!("{BASE}/opds/search{{?query,author,title}}")
+        );
+    }
+
+    #[tokio::test]
+    async fn root_feed_has_groups() {
+        let (_, _, json) = get("/opds").await;
+        let groups = json["groups"].as_array().expect("groups array");
+        assert_eq!(groups.len(), 2);
+
+        // A publications group previewing recent titles, with a self link.
+        let new = &groups[0];
+        assert_eq!(new["metadata"]["title"], "New Publications");
+        assert_eq!(new["metadata"]["numberOfItems"], 5);
+        assert!(!new["publications"].as_array().unwrap().is_empty());
+        assert!(
+            new["links"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|l| l["rel"] == "self")
+        );
+
+        // A navigation group listing the category feeds.
+        let browse = &groups[1];
+        assert_eq!(browse["metadata"]["title"], "Browse by Category");
+        assert_eq!(browse["navigation"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn paid_publication_has_indirect_acquisition() {
+        let (_, _, json) = get("/opds/publications/pride-and-prejudice").await;
+        let buy = json["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["rel"] == "http://opds-spec.org/acquisition/buy")
+            .expect("a buy link");
+        // The buy link resolves to an HTML page; the file is acquired indirectly.
+        assert_eq!(buy["type"], "text/html");
+        assert_eq!(buy["properties"]["price"]["value"], 4.99);
+        assert_eq!(
+            buy["properties"]["indirectAcquisition"][0]["type"],
+            "application/epub+zip"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_filters_by_author_and_title_fields() {
+        // Author-only filter.
+        let (_, _, json) = get("/opds/search?author=austen").await;
+        assert_eq!(json["metadata"]["numberOfItems"], 1);
+        assert_eq!(
+            json["publications"][0]["metadata"]["title"],
+            "Pride and Prejudice"
+        );
+
+        // Title-only filter.
+        let (_, _, json) = get("/opds/search?title=war").await;
+        assert_eq!(json["metadata"]["numberOfItems"], 1);
+        assert_eq!(json["publications"][0]["metadata"]["title"], "The Art of War");
+
+        // A query and an author filter that disagree yield nothing.
+        let (_, _, json) = get("/opds/search?query=whale&author=austen").await;
+        assert_eq!(json["metadata"]["numberOfItems"], 0);
     }
 
     #[tokio::test]

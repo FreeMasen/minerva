@@ -206,14 +206,20 @@ impl Book {
             None => Link::new(format!("{base}/opds/download/{}.epub", self.id))
                 .with_rel("http://opds-spec.org/acquisition/open-access")
                 .with_type("application/epub+zip"),
+            // The buy link points at an HTML purchase page; the actual file is
+            // obtained indirectly afterwards, described by indirectAcquisition.
             Some(price) => Link::new(format!("{base}/opds/buy/{}", self.id))
                 .with_rel("http://opds-spec.org/acquisition/buy")
-                .with_type("application/epub+zip")
+                .with_type("text/html")
                 .with_properties(LinkProperties {
                     price: Some(Price {
                         currency: "USD".to_string(),
                         value: price,
                     }),
+                    indirect_acquisition: vec![IndirectAcquisition {
+                        type_: "application/epub+zip".to_string(),
+                        child: Vec::new(),
+                    }],
                     ..Default::default()
                 }),
         };

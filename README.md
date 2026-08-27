@@ -39,11 +39,11 @@ when a book has no cover).
 | Method & path                  | Description                                             |
 | ------------------------------ | ------------------------------------------------------- |
 | `GET /`                        | Redirects to `/opds`.                                   |
-| `GET /opds`                    | Root **navigation** feed (entry point + search link).   |
+| `GET /opds`                    | Root feed: navigation, a "New Publications" **group**, and a browse group. |
 | `GET /opds/all?page=N`         | Paginated **acquisition** feed of all publications, with facets and pagination links. |
 | `GET /opds/category/{slug}`    | Acquisition feed for a category (`fiction`/`nonfiction`).|
 | `GET /opds/publications/{id}`  | A single publication document.                          |
-| `GET /opds/search?query=...`   | Search feed (matches title, author, description).       |
+| `GET /opds/search?query=...`   | Search feed; also accepts `author=` and `title=` field filters. |
 | `GET /opds/download/{id}.epub` | Open-access download: a generated minimal EPUB 3.       |
 | `GET /opds/buy/{id}`           | Placeholder purchase page for a paid title.             |
 | `GET /opds/covers/{id}.svg`    | Generated SVG cover (`{id}-thumb.svg` for the thumbnail).|
@@ -51,17 +51,21 @@ when a book has no cover).
 ## What's implemented
 
 - The core collection model: feeds with `metadata`, `links`, `navigation`,
-  `publications`, `facets`.
+  `publications`, `facets`, and `groups` (the root feed groups a publications
+  preview and a category-browse navigation collection, each with its own
+  metadata and `self` link).
 - Link objects with `rel`, `type`, `title`, `templated`, and `properties`.
 - A filesystem-backed catalog (`OPDS_LIBRARY_DIR`) that scans EPUB files for
   metadata and covers and live-reloads on additions/removals, alongside the
   built-in sample catalog.
 - Acquisition links: free `open-access` downloads and paid `buy` links carrying
-  a `price` (currency + value) — both backed by working endpoints. Downloads
-  stream real EPUB bytes (or a generated minimal EPUB 3 for samples).
+  a `price` (currency + value) and an `indirectAcquisition` describing the file
+  obtained after the (HTML) purchase page — both backed by working endpoints.
+  Downloads stream real EPUB bytes (or a generated minimal EPUB 3 for samples).
 - Cover `images` (full-size + thumbnail), served from the EPUB's embedded cover
   or as a generated SVG placeholder.
-- A templated `search` link and a working search endpoint.
+- A templated `search` link (`search{?query,author,title}`) and a search
+  endpoint supporting a general query plus per-field author/title filters.
 - Pagination on the acquisition feed: `numberOfItems`/`itemsPerPage`/`currentPage`
   metadata plus `first`/`previous`/`next`/`last` links.
 - Correct OPDS media types on every response.
