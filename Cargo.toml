@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8", features = ["multipart"] }
+base64 = "0.22"
 jiff = "0.2"
 tera = "1"
 clap = { version = "4", features = ["derive", "env"] }

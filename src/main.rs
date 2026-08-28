@@ -18,7 +18,6 @@ const PAGE_SIZE: u64 = 3;
 mod admin;
 mod assets;
 mod auth;
-mod base64;
 mod catalog;
 mod db;
 mod epub;
@@ -38,6 +37,7 @@ use axum::{
     routing::{delete, get},
 };
 use anyhow::Context;
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 
@@ -341,7 +341,7 @@ fn extract_basic(headers: &HeaderMap) -> Option<(String, String)> {
         .to_str()
         .ok()?
         .strip_prefix("Basic ")?;
-    let decoded = base64::decode(encoded.trim())?;
+    let decoded = BASE64_STANDARD.decode(encoded.trim()).ok()?;
     let text = String::from_utf8(decoded).ok()?;
     let (user, pass) = text.split_once(':')?;
     Some((user.to_string(), pass.to_string()))
@@ -1405,14 +1405,6 @@ mod tests {
         assert!(!store.verify("alice", "correct horse").await);
     }
 
-    #[test]
-    fn base64_round_trips() {
-        for sample in ["admin:secret", "", "a", "ab", "abc", "user:p@ss:word"] {
-            let encoded = base64::encode(sample.as_bytes());
-            assert_eq!(base64::decode(&encoded).unwrap(), sample.as_bytes());
-        }
-    }
-
     #[tokio::test]
     async fn protected_catalog_challenges_without_credentials() {
         let response = test_app_with_auth()
@@ -1435,7 +1427,7 @@ mod tests {
 
     #[tokio::test]
     async fn protected_catalog_accepts_valid_credentials() {
-        let credentials = base64::encode(b"admin:secret");
+        let credentials = BASE64_STANDARD.encode(b"admin:secret");
         let response = test_app_with_auth()
             .await
             .oneshot(
@@ -1452,7 +1444,7 @@ mod tests {
 
     #[tokio::test]
     async fn protected_catalog_rejects_wrong_password() {
-        let credentials = base64::encode(b"admin:wrong");
+        let credentials = BASE64_STANDARD.encode(b"admin:wrong");
         let response = test_app_with_auth()
             .await
             .oneshot(
