@@ -135,7 +135,7 @@ cargo sqlx prepare                         # refresh .sqlx/ — commit the resul
 - `src/epub.rs` — reads metadata and cover images out of EPUB files.
 - `src/assets.rs` — on-the-fly EPUB and SVG cover generation (for samples and
   cover fallbacks).
-- `src/watch.rs` — watches the library directory and hot-swaps the catalog.
+- `src/watch.rs` — watches the library directory and updates the catalog store.
 - `src/base64.rs` — minimal Base64 for HTTP Basic credentials.
 - `src/auth.rs` — the SQLite-backed user store and Argon2 password hashing.
 - `src/main.rs` — the Axum router, handlers, auth middleware, and response wrapper.

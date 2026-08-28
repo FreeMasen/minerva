@@ -134,10 +134,11 @@ async fn run_server(cli: Cli) -> anyhow::Result<()> {
         None
     };
 
-    // Reflect additions/removals in the library directory as they happen. The
-    // watcher runs on its own thread and drives the async store via this handle.
+    // Reflect additions/removals in the library directory as they happen.
     if let Some(dir) = library_dir {
-        watch::spawn(dir, catalog.clone(), tokio::runtime::Handle::current());
+        if let Err(err) = watch::spawn(dir, catalog.clone()) {
+            tracing::warn!(%err, "failed to start the library watcher");
+        }
     }
 
     let state = Arc::new(AppState {

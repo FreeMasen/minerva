@@ -271,7 +271,8 @@ impl CatalogStore {
         }
 
         self.delete_missing(&seen).await;
-        tracing::info!(count = self.count().await, dir = %dir.display(), "catalog reconciled");
+        let count = self.count().await;
+        tracing::info!(count, dir = %dir.display(), "catalog reconciled");
     }
 
     /// Insert or update a single file-backed book, keeping its id stable across
