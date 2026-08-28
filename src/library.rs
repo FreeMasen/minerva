@@ -53,7 +53,7 @@ impl BookRow {
             author: self.author,
             language: self.language,
             description: self.description,
-            modified: self.modified,
+            modified: self.modified.as_deref().and_then(catalog::parse_timestamp),
             price_usd: self.price_usd,
             lendable: self.lendable != 0,
             source,
@@ -424,6 +424,7 @@ impl CatalogStore {
         if existing.is_some() {
             let (cover_zip, cover_type) = cover_columns(book);
             let lendable = book.lendable as i64;
+            let modified = book.modified.as_ref().map(jiff::Timestamp::to_string);
             if let Err(err) = sqlx::query!(
                 "UPDATE books SET file_mtime = ?, title = ?, author = ?, language = ?,
                      description = ?, modified = ?, price_usd = ?, lendable = ?,
@@ -434,7 +435,7 @@ impl CatalogStore {
                 book.author,
                 book.language,
                 book.description,
-                book.modified,
+                modified,
                 book.price_usd,
                 lendable,
                 cover_zip,
@@ -490,6 +491,7 @@ impl CatalogStore {
         };
         let (cover_zip, cover_type) = cover_columns(book);
         let lendable = book.lendable as i64;
+        let modified = book.modified.as_ref().map(jiff::Timestamp::to_string);
         sqlx::query!(
             "INSERT INTO books (id, file_path, file_mtime, title, author, language,
                  description, modified, price_usd, lendable,
@@ -502,7 +504,7 @@ impl CatalogStore {
             book.author,
             book.language,
             book.description,
-            book.modified,
+            modified,
             book.price_usd,
             lendable,
             cover_zip,

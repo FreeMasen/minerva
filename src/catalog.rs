@@ -20,7 +20,7 @@ pub struct Book {
     pub author: String,
     pub language: Option<String>,
     pub description: Option<String>,
-    pub modified: Option<String>,
+    pub modified: Option<jiff::Timestamp>,
     /// Price in USD for a paid title, or `None` for a free/open-access download.
     pub price_usd: Option<f64>,
     /// Whether the title is borrowed (library lending) rather than downloaded
@@ -102,7 +102,7 @@ pub(crate) fn book_from_file(root: &Path, path: PathBuf, meta: epub::EpubMeta) -
         author: meta.author.unwrap_or_else(|| "Unknown Author".to_string()),
         language: meta.language,
         description: meta.description,
-        modified: meta.modified,
+        modified: meta.modified.as_deref().and_then(parse_timestamp),
         price_usd: None,
         lendable: false,
         source: BookSource::File { path },
@@ -155,6 +155,12 @@ fn classify_subjects(subjects: &[String]) -> Category {
     }
 }
 
+/// Parse an EPUB/RFC 3339 timestamp (e.g. `2015-09-29T17:00:00Z`), ignoring
+/// values that aren't a full timestamp (e.g. a bare date).
+pub(crate) fn parse_timestamp(s: &str) -> Option<jiff::Timestamp> {
+    s.trim().parse().ok()
+}
+
 /// Turn arbitrary text into a URL-safe, lowercase, hyphenated slug.
 pub(crate) fn slugify(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
@@ -190,7 +196,7 @@ impl Book {
         metadata.author = Some(Contributor::new(self.author.clone()));
         metadata.language = self.language.clone();
         metadata.description = self.description.clone();
-        metadata.modified = self.modified.clone();
+        metadata.modified = self.modified.as_ref().map(jiff::Timestamp::to_string);
 
         let self_link = Link::new(format!("{base}/opds/publications/{}", self.id))
             .with_rel("self")
@@ -287,7 +293,7 @@ pub(crate) fn sample_books() -> Vec<(Book, Category)> {
             author: author.to_string(),
             language: Some("en".to_string()),
             description: Some(description.to_string()),
-            modified: Some(modified.to_string()),
+            modified: parse_timestamp(modified),
             price_usd,
             lendable,
             source: BookSource::Sample,

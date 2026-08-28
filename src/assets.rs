@@ -91,6 +91,11 @@ pub fn thumbnail(bytes: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
 fn content_opf(book: &Book) -> String {
     let title = xml_escape(&book.title);
     let author = xml_escape(&book.author);
+    let modified = book
+        .modified
+        .as_ref()
+        .map(jiff::Timestamp::to_string)
+        .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string());
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id">
@@ -112,7 +117,7 @@ fn content_opf(book: &Book) -> String {
 "#,
         id = book.id,
         language = book.language.as_deref().unwrap_or("en"),
-        modified = book.modified.as_deref().unwrap_or("1970-01-01T00:00:00Z"),
+        modified = modified,
     )
 }
 
