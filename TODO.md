@@ -1,6 +1,17 @@
 # Plan / deferred work
 
 - use walkdir for collecting ebooks instead of rolling it yourself
+- timestamps should be based on jiff types instead of strings
+- make a pass at reducing allocation, especially for duplicated string allocations
+- Server Admin
+  - Add cli subcommands for updating database entries
+  - add a web page for managing the collection
+    - Upload
+    - Add Category
+    - Remove Category
+    - Remove Book
+    - Change Properties (i.e title, author)
+- Ensure authors can be used as categories 
 
 ## Done
 

@@ -70,27 +70,20 @@ pub(crate) fn is_epub(path: &Path) -> bool {
 /// Recursively collect the `.epub` files under `root`, sorted. Symlinks are not
 /// followed, so symlinked directories can't cause cycles.
 pub(crate) fn epub_paths(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-
-    while let Some(dir) = stack.pop() {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries,
+    let mut out: Vec<PathBuf> = walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|entry| match entry {
+            Ok(entry) => Some(entry),
             Err(err) => {
-                tracing::warn!(?err, dir = %dir.display(), "cannot read directory");
-                continue;
+                tracing::warn!(?err, "cannot read directory entry");
+                None
             }
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            if is_dir {
-                stack.push(path);
-            } else if is_epub(&path) {
-                out.push(path);
-            }
-        }
-    }
+        })
+        .filter(|entry| entry.file_type().is_file())
+        .map(walkdir::DirEntry::into_path)
+        .filter(|path| is_epub(path))
+        .collect();
 
     out.sort();
     out
