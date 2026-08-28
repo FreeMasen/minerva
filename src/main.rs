@@ -15,6 +15,7 @@ const AUTH_REALM: &str = "OPDS catalog";
 /// Number of publications served per page in acquisition feeds.
 const PAGE_SIZE: u64 = 3;
 
+mod admin;
 mod assets;
 mod auth;
 mod base64;
@@ -98,6 +99,8 @@ struct AppState {
     catalog: Arc<CatalogStore>,
     /// The user store protecting the catalog, if configured.
     auth: Option<Arc<AuthStore>>,
+    /// The watched library directory, if any (target for admin uploads).
+    library_dir: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -200,8 +203,8 @@ async fn run_server(cli: Cli) -> anyhow::Result<()> {
     };
 
     // Reflect additions/removals in the library directory as they happen.
-    if let Some(dir) = library_dir {
-        if let Err(err) = watch::spawn(dir, catalog.clone()) {
+    if let Some(dir) = &library_dir {
+        if let Err(err) = watch::spawn(dir.clone(), catalog.clone()) {
             tracing::warn!(?err, "failed to start the library watcher");
         }
     }
@@ -210,6 +213,7 @@ async fn run_server(cli: Cli) -> anyhow::Result<()> {
         base_url: cli.base_url,
         catalog,
         auth,
+        library_dir,
     });
 
     let addr = "0.0.0.0:3000";
@@ -290,6 +294,7 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/opds/borrow/{id}", get(borrow))
         .route("/opds/covers/{id}", get(cover))
         .route("/opds/covers/{id}/thumb", get(cover_thumb))
+        .merge(admin::routes())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     // The redirect and the authentication document must stay reachable
@@ -955,6 +960,7 @@ mod tests {
             base_url: BASE.to_string(),
             catalog: sample_store().await,
             auth: None,
+            library_dir: None,
         }))
     }
 
@@ -969,6 +975,7 @@ mod tests {
             base_url: BASE.to_string(),
             catalog: Arc::new(catalog),
             auth: Some(Arc::new(users)),
+            library_dir: None,
         }))
     }
 
@@ -1556,5 +1563,51 @@ mod tests {
             .map(|c| c.slug)
             .collect();
         assert_eq!(slugs, ["fiction"]);
+    }
+
+    #[tokio::test]
+    async fn admin_lists_edits_and_removes_books() {
+        // A single app instance shares one in-memory catalog across requests.
+        let app = test_app().await;
+
+        let get = |uri: &str| {
+            app.clone()
+                .oneshot(Request::builder().uri(uri.to_string()).body(Body::empty()).unwrap())
+        };
+        let post = |uri: &str, body: &'static str| {
+            app.clone().oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri.to_string())
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+        };
+
+        // The admin page renders and lists books.
+        let response = get("/admin").await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("Catalog admin"));
+        assert!(html.contains("Moby-Dick"));
+
+        // Editing properties updates the publication.
+        let response = post("/admin/books/moby-dick/properties", "title=Renamed&author=Someone")
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let response = get("/opds/publications/moby-dick").await.unwrap();
+        let json: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(json["metadata"]["title"], "Renamed");
+
+        // Removing a book makes it 404.
+        let response = post("/admin/books/frankenstein/delete", "").await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let response = get("/opds/publications/frankenstein").await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

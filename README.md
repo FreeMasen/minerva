@@ -148,6 +148,13 @@ cargo run -- remove-book <id>
 Note: for file-backed books, edits to title/author persist until the EPUB file
 changes and is re-scanned.
 
+## Web admin
+
+A small management UI is served at `/admin` (behind auth when it is enabled).
+It lists every book with inline forms to edit the title/author, add/remove
+categories, and remove the book, plus an EPUB upload form. Uploads are saved
+into `OPDS_LIBRARY_DIR` (required for uploads) and reconciled immediately.
+
 ## Deployment
 
 A hardened systemd unit is provided at [`opds-axum.service`](opds-axum.service);

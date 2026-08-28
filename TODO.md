@@ -11,6 +11,7 @@
     - Remove Category
     - Remove Book
     - Change Properties (i.e title, author)
+    - UI via tera for templating
 - Ensure authors can be used as categories
 - use the base64 crate instead of rolling that yourself
 - move the assets.rs and sample_books to be exclusively available for tests

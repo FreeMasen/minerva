@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>opds-axum admin</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 64rem; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border-top: 1px solid #ddd; padding: .5rem; vertical-align: top; text-align: left; }
+    input { margin: .1rem; }
+    .cats { margin-top: .4rem; }
+    .chip { display: inline-flex; align-items: center; gap: .25rem; background: #eee;
+            border-radius: 1rem; padding: .1rem .5rem; margin: .1rem; }
+    .chip button { border: none; background: none; cursor: pointer; padding: 0; }
+    .chip input { border: none; background: none; width: 8rem; }
+  </style>
+</head>
+<body>
+  <h1>Catalog admin</h1>
+
+  <h2>Upload</h2>
+  {% if has_library %}
+  <form method="post" action="/admin/upload" enctype="multipart/form-data">
+    <input type="file" name="file" accept=".epub" required>
+    <button>Upload EPUB</button>
+  </form>
+  {% else %}
+  <p><em>Set <code>OPDS_LIBRARY_DIR</code> to enable uploads.</em></p>
+  {% endif %}
+
+  <h2>Books ({{ count }})</h2>
+  <table>
+    <tr><th>Title / author / categories</th><th>id</th><th></th></tr>
+    {% for book in books %}
+    <tr>
+      <td>
+        <form method="post" action="/admin/books/{{ book.id }}/properties">
+          <input name="title" value="{{ book.title }}" aria-label="title">
+          <input name="author" value="{{ book.author }}" aria-label="author">
+          <button>Save</button>
+        </form>
+        <div class="cats">
+          {% for category in book.categories %}
+          <form class="chip" method="post"
+                action="/admin/books/{{ book.id }}/categories/{{ category.slug }}/delete">
+            <span>{{ category.label }}</span><button title="remove">&times;</button>
+          </form>
+          {% endfor %}
+          <form class="chip" method="post" action="/admin/books/{{ book.id }}/categories">
+            <input name="name" placeholder="add category" aria-label="add category">
+            <button>+</button>
+          </form>
+        </div>
+      </td>
+      <td><code>{{ book.id }}</code></td>
+      <td>
+        <form method="post" action="/admin/books/{{ book.id }}/delete"
+              onsubmit="return confirm('Remove this book?')">
+          <button>Remove</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</body>
+</html>
