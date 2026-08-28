@@ -1,10 +1,10 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, file_path, title, author, language, description, modified,\n                    category, price_usd, lendable, cover_zip_path, cover_media_type\n             FROM books ORDER BY title COLLATE NOCASE",
+  "query": "SELECT b.id AS \"id!\", b.file_path, b.title AS \"title!\", b.author AS \"author!\",\n                      b.language, b.description, b.modified, b.price_usd,\n                      b.lendable AS \"lendable!\", b.cover_zip_path, b.cover_media_type\n               FROM books b\n               JOIN book_categories bc ON bc.book_id = b.id\n               WHERE bc.category_slug = ?\n               ORDER BY b.title COLLATE NOCASE",
   "describe": {
     "columns": [
       {
-        "name": "id",
+        "name": "id!",
         "ordinal": 0,
         "type_info": "Text"
       },
@@ -14,12 +14,12 @@
         "type_info": "Text"
       },
       {
-        "name": "title",
+        "name": "title!",
         "ordinal": 2,
         "type_info": "Text"
       },
       {
-        "name": "author",
+        "name": "author!",
         "ordinal": 3,
         "type_info": "Text"
       },
@@ -39,33 +39,28 @@
         "type_info": "Text"
       },
       {
-        "name": "category",
-        "ordinal": 7,
-        "type_info": "Text"
-      },
-      {
         "name": "price_usd",
-        "ordinal": 8,
+        "ordinal": 7,
         "type_info": "Float"
       },
       {
-        "name": "lendable",
-        "ordinal": 9,
+        "name": "lendable!",
+        "ordinal": 8,
         "type_info": "Integer"
       },
       {
         "name": "cover_zip_path",
-        "ordinal": 10,
+        "ordinal": 9,
         "type_info": "Text"
       },
       {
         "name": "cover_media_type",
-        "ordinal": 11,
+        "ordinal": 10,
         "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 0
+      "Right": 1
     },
     "nullable": [
       false,
@@ -75,12 +70,11 @@
       true,
       true,
       true,
-      false,
       true,
       false,
       true,
       true
     ]
   },
-  "hash": "91a20f43a181c2a4ec439711c3b7890e4caefaae5c69db09d1232a64955f44e7"
+  "hash": "bada4b8c4828ba94c299909db1832b9c925ba7900a33ae87eebfc6ff9aaf0995"
 }

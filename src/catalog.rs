@@ -11,7 +11,8 @@ use crate::epub::{self, CoverRef};
 use crate::model::*;
 
 /// A single book in the catalog. This is the server's own domain type, kept
-/// separate from the wire (`Publication`) representation.
+/// separate from the wire (`Publication`) representation. A book's categories
+/// are a separate many-to-many relation (see [`crate::library`]).
 #[derive(Debug, Clone)]
 pub struct Book {
     pub id: String,
@@ -20,8 +21,6 @@ pub struct Book {
     pub language: Option<String>,
     pub description: Option<String>,
     pub modified: Option<String>,
-    /// One of the top-level catalog categories (used for navigation/facets).
-    pub category: Category,
     /// Price in USD for a paid title, or `None` for a free/open-access download.
     pub price_usd: Option<f64>,
     /// Whether the title is borrowed (library lending) rather than downloaded
@@ -43,76 +42,19 @@ pub enum BookSource {
     File { path: PathBuf },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Category {
-    Fiction,
-    NonFiction,
+/// A category a book can belong to. Categories are arbitrary and created on
+/// demand; a book may belong to several.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Category {
+    pub slug: String,
+    pub label: String,
 }
 
 impl Category {
-    pub fn slug(self) -> &'static str {
-        match self {
-            Category::Fiction => "fiction",
-            Category::NonFiction => "nonfiction",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Category::Fiction => "Fiction",
-            Category::NonFiction => "Non-Fiction",
-        }
-    }
-
-    pub fn from_slug(slug: &str) -> Option<Category> {
-        match slug {
-            "fiction" => Some(Category::Fiction),
-            "nonfiction" => Some(Category::NonFiction),
-            _ => None,
-        }
-    }
-
-    /// Derive a category from a book's location: a file directly under a
-    /// top-level `Fiction` or `Non-Fiction` (a.k.a. `nonfiction`) subfolder of
-    /// the library is categorized accordingly. Returns `None` when the layout
-    /// doesn't indicate a category (e.g. the file sits at the library root).
-    fn from_path(root: &Path, path: &Path) -> Option<Category> {
-        let rel = path.strip_prefix(root).ok()?;
-        // Require an intervening directory component (dir + filename).
-        if rel.components().count() < 2 {
-            return None;
-        }
-        let top = rel.components().next()?.as_os_str().to_str()?.to_lowercase();
-        match top.as_str() {
-            "fiction" => Some(Category::Fiction),
-            "non-fiction" | "nonfiction" => Some(Category::NonFiction),
-            _ => None,
-        }
-    }
-
-    /// Classify a book from its Dublin Core subjects. EPUBs don't carry our
-    /// two-way taxonomy, so this is a best-effort heuristic that defaults to
-    /// non-fiction when the subjects are unhelpful.
-    fn classify(subjects: &[String]) -> Category {
-        let joined = subjects.join(" ").to_lowercase();
-        const NONFICTION_HINTS: [&str; 7] = [
-            "nonfiction",
-            "non-fiction",
-            "biography",
-            "history",
-            "science",
-            "reference",
-            "self-help",
-        ];
-        if NONFICTION_HINTS.iter().any(|h| joined.contains(h)) {
-            Category::NonFiction
-        } else if joined.contains("fiction")
-            || joined.contains("novel")
-            || joined.contains("stories")
-        {
-            Category::Fiction
-        } else {
-            Category::NonFiction
+    pub fn new(slug: impl Into<String>, label: impl Into<String>) -> Self {
+        Category {
+            slug: slug.into(),
+            label: label.into(),
         }
     }
 }
@@ -154,26 +96,91 @@ pub(crate) fn epub_paths(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Build a [`Book`] from a scanned EPUB file and its metadata. The id is a
-/// provisional slug (the store deduplicates on insert); the category prefers the
-/// top-level library subfolder, falling back to subjects.
-pub(crate) fn book_from_file(root: &Path, path: PathBuf, meta: epub::EpubMeta) -> Book {
+/// Build a [`Book`] from a scanned EPUB file and its metadata, along with the
+/// default category to file it under. The id is a provisional slug (the store
+/// deduplicates on insert).
+pub(crate) fn book_from_file(root: &Path, path: PathBuf, meta: epub::EpubMeta) -> (Book, Category) {
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("book");
-    let category = Category::from_path(root, &path).unwrap_or_else(|| Category::classify(&meta.subjects));
+    let category = derive_category(root, &path, &meta.subjects);
 
-    Book {
+    let book = Book {
         id: slugify(meta.title.as_deref().unwrap_or(stem)),
         title: meta.title.unwrap_or_else(|| stem.to_string()),
         author: meta.author.unwrap_or_else(|| "Unknown Author".to_string()),
         language: meta.language,
         description: meta.description,
         modified: meta.modified,
-        category,
         price_usd: None,
         lendable: false,
         source: BookSource::File { path },
         cover: meta.cover,
+    };
+    (book, category)
+}
+
+/// Derive a book's default category when first scanned: prefer a top-level
+/// `Fiction`/`Non-Fiction` library subfolder, else classify from the EPUB's
+/// Dublin Core subjects (defaulting to non-fiction).
+fn derive_category(root: &Path, path: &Path, subjects: &[String]) -> Category {
+    category_from_folder(root, path).unwrap_or_else(|| classify_subjects(subjects))
+}
+
+fn category_from_folder(root: &Path, path: &Path) -> Option<Category> {
+    let rel = path.strip_prefix(root).ok()?;
+    // Require an intervening directory component (dir + filename).
+    if rel.components().count() < 2 {
+        return None;
     }
+    let top = rel.components().next()?.as_os_str().to_str()?.to_lowercase();
+    match top.as_str() {
+        "fiction" => Some(Category::new("fiction", "Fiction")),
+        "non-fiction" | "nonfiction" => Some(Category::new("nonfiction", "Non-Fiction")),
+        _ => None,
+    }
+}
+
+fn classify_subjects(subjects: &[String]) -> Category {
+    let joined = subjects.join(" ").to_lowercase();
+    const NONFICTION_HINTS: [&str; 7] = [
+        "nonfiction",
+        "non-fiction",
+        "biography",
+        "history",
+        "science",
+        "reference",
+        "self-help",
+    ];
+    if NONFICTION_HINTS.iter().any(|h| joined.contains(h)) {
+        Category::new("nonfiction", "Non-Fiction")
+    } else if joined.contains("fiction")
+        || joined.contains("novel")
+        || joined.contains("stories")
+    {
+        Category::new("fiction", "Fiction")
+    } else {
+        Category::new("nonfiction", "Non-Fiction")
+    }
+}
+
+/// Turn arbitrary text into a URL-safe, lowercase, hyphenated slug.
+pub(crate) fn slugify(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut pending_dash = false;
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if pending_dash && !out.is_empty() {
+                out.push('-');
+            }
+            pending_dash = false;
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            pending_dash = true;
+        }
+    }
+    if out.is_empty() {
+        out.push_str("book");
+    }
+    out
 }
 
 impl Book {
@@ -269,29 +276,9 @@ impl Book {
     }
 }
 
-/// Turn arbitrary text into a URL-safe, lowercase, hyphenated id.
-fn slugify(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut pending_dash = false;
-    for ch in input.chars() {
-        if ch.is_ascii_alphanumeric() {
-            if pending_dash && !out.is_empty() {
-                out.push('-');
-            }
-            pending_dash = false;
-            out.push(ch.to_ascii_lowercase());
-        } else {
-            pending_dash = true;
-        }
-    }
-    if out.is_empty() {
-        out.push_str("book");
-    }
-    out
-}
-
-/// The built-in sample set, used when no library directory is configured.
-pub(crate) fn sample_books() -> Vec<Book> {
+/// The built-in sample set (with each book's default category), used when no
+/// library directory is configured.
+pub(crate) fn sample_books() -> Vec<(Book, Category)> {
     let book = |id: &str,
                 title: &str,
                 author: &str,
@@ -299,19 +286,25 @@ pub(crate) fn sample_books() -> Vec<Book> {
                 modified: &str,
                 category: Category,
                 price_usd: Option<f64>,
-                lendable: bool| Book {
-        id: id.to_string(),
-        title: title.to_string(),
-        author: author.to_string(),
-        language: Some("en".to_string()),
-        description: Some(description.to_string()),
-        modified: Some(modified.to_string()),
-        category,
-        price_usd,
-        lendable,
-        source: BookSource::Sample,
-        cover: None,
+                lendable: bool|
+     -> (Book, Category) {
+        let book = Book {
+            id: id.to_string(),
+            title: title.to_string(),
+            author: author.to_string(),
+            language: Some("en".to_string()),
+            description: Some(description.to_string()),
+            modified: Some(modified.to_string()),
+            price_usd,
+            lendable,
+            source: BookSource::Sample,
+            cover: None,
+        };
+        (book, category)
     };
+
+    let fiction = || Category::new("fiction", "Fiction");
+    let nonfiction = || Category::new("nonfiction", "Non-Fiction");
 
     vec![
         book(
@@ -320,7 +313,7 @@ pub(crate) fn sample_books() -> Vec<Book> {
             "Herman Melville",
             "The saga of Captain Ahab and his monomaniacal pursuit of the white whale.",
             "2015-09-29T17:00:00Z",
-            Category::Fiction,
+            fiction(),
             None,
             false,
         ),
@@ -330,7 +323,7 @@ pub(crate) fn sample_books() -> Vec<Book> {
             "Jane Austen",
             "Elizabeth Bennet navigates manners, upbringing, and marriage.",
             "2016-01-12T09:30:00Z",
-            Category::Fiction,
+            fiction(),
             Some(4.99),
             false,
         ),
@@ -340,7 +333,7 @@ pub(crate) fn sample_books() -> Vec<Book> {
             "Mary Shelley",
             "A scientist creates a sapient creature and reaps the consequences.",
             "2018-07-03T12:00:00Z",
-            Category::Fiction,
+            fiction(),
             None,
             false,
         ),
@@ -350,7 +343,7 @@ pub(crate) fn sample_books() -> Vec<Book> {
             "Charles Darwin",
             "The foundational work of evolutionary biology.",
             "2017-11-24T00:00:00Z",
-            Category::NonFiction,
+            nonfiction(),
             Some(2.99),
             false,
         ),
@@ -360,7 +353,7 @@ pub(crate) fn sample_books() -> Vec<Book> {
             "Sun Tzu",
             "An ancient Chinese treatise on military strategy.",
             "2019-02-14T08:00:00Z",
-            Category::NonFiction,
+            nonfiction(),
             None,
             true, // borrowable — demonstrates library lending
         ),

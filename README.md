@@ -59,8 +59,11 @@ no cover).
 | `GET /`                        | Redirects to `/opds`.                                   |
 | `GET /opds`                    | Root feed: navigation, a "New Publications" **group**, and a browse group. |
 | `GET /opds/all?page=N`         | Paginated **acquisition** feed of all publications, with facets and pagination links. |
-| `GET /opds/category/{slug}`    | Acquisition feed for a category (`fiction`/`nonfiction`).|
+| `GET /opds/category/{slug}`    | Acquisition feed for a category.                        |
 | `GET /opds/publications/{id}`  | A single publication document.                          |
+| `GET /opds/publications/{id}/categories` | JSON list of a publication's categories.      |
+| `POST /opds/publications/{id}/categories` | Assign a category: `{"name": "Sci-Fi"}` (created on demand). |
+| `DELETE /opds/publications/{id}/categories/{slug}` | Remove a category from a publication. |
 | `GET /opds/search?query=...`   | Search feed; also accepts `author=` and `title=` field filters. |
 | `GET /opds/download/{id}.epub` | Open-access download: a generated minimal EPUB 3.       |
 | `GET /opds/buy/{id}`           | Advertised for spec completeness; returns 501 (no store).|
@@ -75,6 +78,11 @@ no cover).
   preview and a category-browse navigation collection, each with its own
   metadata and `self` link).
 - Link objects with `rel`, `type`, `title`, `templated`, and `properties`.
+- Arbitrary, many-to-many categories (a `categories`/`book_categories` table
+  pair): scanning files them under a default category (library subfolder or
+  subject heuristic), and they can be assigned/removed at runtime via the
+  publication category endpoints. The facet, browse group, and
+  `/opds/category/{slug}` feed are all driven from the table.
 - A filesystem-backed catalog (`OPDS_LIBRARY_DIR`) that scans EPUB files for
   metadata and covers and live-reloads on additions/removals, alongside the
   built-in sample catalog.

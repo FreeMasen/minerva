@@ -115,9 +115,8 @@ async fn apply_batch(dir: &Path, store: &CatalogStore, events: Vec<DebouncedEven
             match crate::epub::read_meta(&path) {
                 Ok(meta) => {
                     let mtime = file_mtime(&path);
-                    store
-                        .upsert_file(&book_from_file(dir, path, meta), mtime)
-                        .await;
+                    let (book, category) = book_from_file(dir, path, meta);
+                    store.upsert_file(&book, mtime, &category).await;
                 }
                 Err(err) => {
                     tracing::warn!(?err, path = %path.display(), "dropping unreadable EPUB");

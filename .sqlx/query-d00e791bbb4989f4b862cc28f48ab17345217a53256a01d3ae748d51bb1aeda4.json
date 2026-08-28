@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT c.slug AS \"slug!\", c.label AS \"label!\", COUNT(bc.book_id) AS \"count!: i64\"\n               FROM categories c\n               JOIN book_categories bc ON bc.category_slug = c.slug\n               GROUP BY c.slug, c.label\n               ORDER BY c.label COLLATE NOCASE",
+  "describe": {
+    "columns": [
+      {
+        "name": "slug!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "label!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "count!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "d00e791bbb4989f4b862cc28f48ab17345217a53256a01d3ae748d51bb1aeda4"
+}

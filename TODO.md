@@ -1,6 +1,6 @@
 # Plan / deferred work
 
-All previously-deferred items have been implemented. Kept here as a record.
+- use walkdir for collecting ebooks instead of rolling it yourself
 
 ## Done
 

@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, file_path, title, author, language, description, modified,\n                    category, price_usd, lendable, cover_zip_path, cover_media_type\n             FROM books WHERE category = ? ORDER BY title COLLATE NOCASE",
+  "query": "SELECT id, file_path, title, author, language, description, modified,\n                    price_usd, lendable, cover_zip_path, cover_media_type\n             FROM books ORDER BY title COLLATE NOCASE",
   "describe": {
     "columns": [
       {
@@ -39,33 +39,28 @@
         "type_info": "Text"
       },
       {
-        "name": "category",
-        "ordinal": 7,
-        "type_info": "Text"
-      },
-      {
         "name": "price_usd",
-        "ordinal": 8,
+        "ordinal": 7,
         "type_info": "Float"
       },
       {
         "name": "lendable",
-        "ordinal": 9,
+        "ordinal": 8,
         "type_info": "Integer"
       },
       {
         "name": "cover_zip_path",
-        "ordinal": 10,
+        "ordinal": 9,
         "type_info": "Text"
       },
       {
         "name": "cover_media_type",
-        "ordinal": 11,
+        "ordinal": 10,
         "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 0
     },
     "nullable": [
       false,
@@ -75,12 +70,11 @@
       true,
       true,
       true,
-      false,
       true,
       false,
       true,
       true
     ]
   },
-  "hash": "600b448a9fcb6265f0179edec4a78b39703f3d8f5a2a384f38e140dfb1af7419"
+  "hash": "3babea30d7b8d7dac3c0b808980d082ad4e34173eeb1d30802fd7752f28a723c"
 }

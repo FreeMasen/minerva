@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, file_path, title, author, language, description, modified,\n                    category, price_usd, lendable, cover_zip_path, cover_media_type\n             FROM books WHERE id = ?",
+  "query": "SELECT id, file_path, title, author, language, description, modified,\n                    price_usd, lendable, cover_zip_path, cover_media_type\n             FROM books ORDER BY modified DESC LIMIT ?",
   "describe": {
     "columns": [
       {
@@ -39,28 +39,23 @@
         "type_info": "Text"
       },
       {
-        "name": "category",
-        "ordinal": 7,
-        "type_info": "Text"
-      },
-      {
         "name": "price_usd",
-        "ordinal": 8,
+        "ordinal": 7,
         "type_info": "Float"
       },
       {
         "name": "lendable",
-        "ordinal": 9,
+        "ordinal": 8,
         "type_info": "Integer"
       },
       {
         "name": "cover_zip_path",
-        "ordinal": 10,
+        "ordinal": 9,
         "type_info": "Text"
       },
       {
         "name": "cover_media_type",
-        "ordinal": 11,
+        "ordinal": 10,
         "type_info": "Text"
       }
     ],
@@ -75,12 +70,11 @@
       true,
       true,
       true,
-      false,
       true,
       false,
       true,
       true
     ]
   },
-  "hash": "8b935751e591821caad6096767a7c19fdc5c823e355ba31fb9e0b2284d1bbf78"
+  "hash": "89ad85a1959fe2b93fd8e6be0089a1e95f8c7bdac858253fa2157e68314a49e9"
 }

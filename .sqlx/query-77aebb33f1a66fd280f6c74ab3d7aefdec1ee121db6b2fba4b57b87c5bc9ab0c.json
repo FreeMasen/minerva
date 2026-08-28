@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT c.slug AS \"slug!\", c.label AS \"label!\"\n               FROM categories c\n               JOIN book_categories bc ON bc.category_slug = c.slug\n               WHERE bc.book_id = ?\n               ORDER BY c.label COLLATE NOCASE",
+  "describe": {
+    "columns": [
+      {
+        "name": "slug!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "label!",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "77aebb33f1a66fd280f6c74ab3d7aefdec1ee121db6b2fba4b57b87c5bc9ab0c"
+}

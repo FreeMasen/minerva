@@ -29,19 +29,19 @@ use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
 use axum::{
-    Router,
+    Json, Router,
     extract::{Path, Query, Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{delete, get},
 };
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 
 use crate::auth::AuthStore;
-use crate::catalog::{BookSource, Category};
+use crate::catalog::BookSource;
 use crate::library::CatalogStore;
 use crate::model::*;
 
@@ -213,6 +213,14 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/opds/all", get(all_publications))
         .route("/opds/category/{slug}", get(category_feed))
         .route("/opds/publications/{id}", get(publication))
+        .route(
+            "/opds/publications/{id}/categories",
+            get(list_categories).post(assign_category),
+        )
+        .route(
+            "/opds/publications/{id}/categories/{slug}",
+            delete(unassign_category),
+        )
         .route("/opds/search", get(search))
         .route("/opds/download/{file}", get(download))
         .route("/opds/buy/{id}", get(buy))
@@ -415,24 +423,27 @@ async fn root_feed(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         publications: recent.iter().map(|b| b.to_publication(base)).collect(),
     };
 
-    // A "Browse by Category" group: a navigation collection of category feeds.
-    let browse_group = Group {
-        metadata: Metadata::new("Browse by Category"),
-        links: Vec::new(),
-        navigation: vec![
-            Link::new(format!("{base}/opds/category/fiction"))
-                .with_rel("subsection")
-                .with_type(FEED_MEDIA_TYPE)
-                .with_title("Fiction"),
-            Link::new(format!("{base}/opds/category/nonfiction"))
-                .with_rel("subsection")
-                .with_type(FEED_MEDIA_TYPE)
-                .with_title("Non-Fiction"),
-        ],
-        publications: Vec::new(),
-    };
+    feed.groups = vec![new_group];
 
-    feed.groups = vec![new_group, browse_group];
+    // A "Browse by Category" group: a navigation collection of the categories
+    // that currently have books. Omitted when there are none.
+    let categories = state.catalog.categories().await;
+    if !categories.is_empty() {
+        feed.groups.push(Group {
+            metadata: Metadata::new("Browse by Category"),
+            links: Vec::new(),
+            navigation: categories
+                .into_iter()
+                .map(|(category, _count)| {
+                    Link::new(format!("{base}/opds/category/{}", category.slug))
+                        .with_rel("subsection")
+                        .with_type(FEED_MEDIA_TYPE)
+                        .with_title(category.label)
+                })
+                .collect(),
+            publications: Vec::new(),
+        });
+    }
 
     Opds::feed(feed)
 }
@@ -507,14 +518,14 @@ async fn category_feed(
 ) -> Response {
     let base = &state.base_url;
 
-    let Some(category) = Category::from_slug(&slug) else {
+    let Some(category) = state.catalog.category(&slug).await else {
         return not_found("No such category");
     };
 
-    let books = state.catalog.by_category(category).await;
+    let books = state.catalog.books_in_category(&slug).await;
 
     let mut feed = Feed::new(
-        category.label(),
+        category.label,
         format!("{base}/opds/category/{slug}"),
     )
     .with_link(
@@ -727,28 +738,74 @@ async fn serve_cover(state: Arc<AppState>, id: String, thumbnail: bool) -> Respo
     ([(header::CONTENT_TYPE, "image/svg+xml")], svg).into_response()
 }
 
-/// Build a "Category" facet group linking to each category feed.
+/// Build a "Category" facet linking to each (non-empty) category feed.
 async fn category_facet(base: &str, catalog: &CatalogStore) -> Facet {
-    let facet_link = |category: Category, count: u64| {
-        Link::new(format!("{base}/opds/category/{}", category.slug()))
-            .with_type(FEED_MEDIA_TYPE)
-            .with_title(category.label())
-            .with_properties(LinkProperties {
-                number_of_items: Some(count),
-                ..Default::default()
-            })
-    };
+    let links = catalog
+        .categories()
+        .await
+        .into_iter()
+        .map(|(category, count)| {
+            Link::new(format!("{base}/opds/category/{}", category.slug))
+                .with_type(FEED_MEDIA_TYPE)
+                .with_title(category.label)
+                .with_properties(LinkProperties {
+                    number_of_items: Some(count),
+                    ..Default::default()
+                })
+        })
+        .collect();
 
     Facet {
         metadata: Metadata::new("Category"),
-        links: vec![
-            facet_link(Category::Fiction, catalog.count_category(Category::Fiction).await),
-            facet_link(
-                Category::NonFiction,
-                catalog.count_category(Category::NonFiction).await,
-            ),
-        ],
+        links,
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct AssignCategory {
+    /// The category's human-readable name (its slug is derived from this).
+    name: String,
+}
+
+/// List the categories a publication belongs to.
+async fn list_categories(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    if state.catalog.get(&id).await.is_none() {
+        return not_found("No such publication");
+    }
+    Json(state.catalog.book_categories(&id).await).into_response()
+}
+
+/// Assign a category to a publication, creating the category on demand. Returns
+/// the publication's updated category list.
+async fn assign_category(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<AssignCategory>,
+) -> Response {
+    let name = body.name.trim();
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "category name must not be empty").into_response();
+    }
+    if state.catalog.get(&id).await.is_none() {
+        return not_found("No such publication");
+    }
+    if let Err(err) = state.catalog.assign_category(&id, name).await {
+        tracing::error!(?err, id, "failed to assign category");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "failed to assign category").into_response();
+    }
+    Json(state.catalog.book_categories(&id).await).into_response()
+}
+
+/// Remove a category from a publication. Returns the updated category list.
+async fn unassign_category(
+    State(state): State<Arc<AppState>>,
+    Path((id, slug)): Path<(String, String)>,
+) -> Response {
+    if state.catalog.get(&id).await.is_none() {
+        return not_found("No such publication");
+    }
+    state.catalog.remove_category(&id, &slug).await;
+    Json(state.catalog.book_categories(&id).await).into_response()
 }
 
 /// A minimal application/x-www-form-urlencoded-style encoder for query values.
@@ -1332,15 +1389,67 @@ mod tests {
         store.reconcile_dir(&dir).await;
         assert_eq!(store.count().await, 2);
         for book in store.all().await {
+            let slugs: Vec<String> = store
+                .book_categories(&book.id)
+                .await
+                .into_iter()
+                .map(|c| c.slug)
+                .collect();
             if book.title.contains("Moby") {
-                assert_eq!(book.category, Category::Fiction);
+                assert_eq!(slugs, ["fiction"]);
             } else if book.title.contains("Art of War") {
-                assert_eq!(book.category, Category::NonFiction);
+                assert_eq!(slugs, ["nonfiction"]);
             } else {
                 panic!("unexpected book: {}", book.title);
             }
         }
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn assign_and_remove_categories() {
+        let store = CatalogStore::new(db::connect_memory().await.unwrap());
+        store.reset_to_samples().await;
+
+        // moby-dick starts in "fiction" (sample default).
+        let initial: Vec<String> = store
+            .book_categories("moby-dick")
+            .await
+            .into_iter()
+            .map(|c| c.slug)
+            .collect();
+        assert_eq!(initial, ["fiction"]);
+
+        // Assign a new, arbitrary category (created on demand, slug derived).
+        let category = store
+            .assign_category("moby-dick", "Sea Stories")
+            .await
+            .unwrap();
+        assert_eq!(category.slug, "sea-stories");
+        assert_eq!(category.label, "Sea Stories");
+
+        let slugs: Vec<String> = store
+            .book_categories("moby-dick")
+            .await
+            .into_iter()
+            .map(|c| c.slug)
+            .collect();
+        assert_eq!(slugs, ["fiction", "sea-stories"]); // ordered by label
+
+        // It now shows up in the (non-empty) category listing.
+        assert!(store.categories().await.iter().any(|(c, n)| c.slug == "sea-stories" && *n == 1));
+        assert_eq!(store.books_in_category("sea-stories").await.len(), 1);
+
+        // Removing it is reflected, and a second remove is a no-op.
+        store.remove_category("moby-dick", "sea-stories").await;
+        store.remove_category("moby-dick", "sea-stories").await;
+        let slugs: Vec<String> = store
+            .book_categories("moby-dick")
+            .await
+            .into_iter()
+            .map(|c| c.slug)
+            .collect();
+        assert_eq!(slugs, ["fiction"]);
     }
 }

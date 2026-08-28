@@ -4,6 +4,9 @@
 //! table and handlers query it per request. The store is also the shared,
 //! mutable state the file watcher updates as EPUBs come and go. Connections come
 //! from a pool, so reads can proceed concurrently.
+//!
+//! Categories are arbitrary, created on demand, and joined to books many-to-many
+//! via the `categories` and `book_categories` tables.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -23,7 +26,6 @@ struct BookRow {
     language: Option<String>,
     description: Option<String>,
     modified: Option<String>,
-    category: String,
     price_usd: Option<f64>,
     lendable: i64,
     cover_zip_path: Option<String>,
@@ -52,7 +54,6 @@ impl BookRow {
             language: self.language,
             description: self.description,
             modified: self.modified,
-            category: Category::from_slug(&self.category).unwrap_or(Category::NonFiction),
             price_usd: self.price_usd,
             lendable: self.lendable != 0,
             source,
@@ -82,24 +83,12 @@ impl CatalogStore {
             .unwrap_or(0) as u64
     }
 
-    /// Number of books in a category.
-    pub async fn count_category(&self, category: Category) -> u64 {
-        let slug = category.slug();
-        sqlx::query_scalar!(
-            r#"SELECT COUNT(*) AS "count!: i64" FROM books WHERE category = ?"#,
-            slug
-        )
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or(0) as u64
-    }
-
     /// Look up a single book by id.
     pub async fn get(&self, id: &str) -> Option<Book> {
         sqlx::query_as!(
             BookRow,
             "SELECT id, file_path, title, author, language, description, modified,
-                    category, price_usd, lendable, cover_zip_path, cover_media_type
+                    price_usd, lendable, cover_zip_path, cover_media_type
              FROM books WHERE id = ?",
             id
         )
@@ -117,7 +106,7 @@ impl CatalogStore {
         sqlx::query_as!(
             BookRow,
             "SELECT id, file_path, title, author, language, description, modified,
-                    category, price_usd, lendable, cover_zip_path, cover_media_type
+                    price_usd, lendable, cover_zip_path, cover_media_type
              FROM books ORDER BY title COLLATE NOCASE LIMIT ? OFFSET ?",
             limit,
             offset
@@ -134,25 +123,9 @@ impl CatalogStore {
         sqlx::query_as!(
             BookRow,
             "SELECT id, file_path, title, author, language, description, modified,
-                    category, price_usd, lendable, cover_zip_path, cover_media_type
+                    price_usd, lendable, cover_zip_path, cover_media_type
              FROM books ORDER BY modified DESC LIMIT ?",
             limit
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map(into_books)
-        .unwrap_or_default()
-    }
-
-    /// All books in a category, ordered by title.
-    pub async fn by_category(&self, category: Category) -> Vec<Book> {
-        let slug = category.slug();
-        sqlx::query_as!(
-            BookRow,
-            "SELECT id, file_path, title, author, language, description, modified,
-                    category, price_usd, lendable, cover_zip_path, cover_media_type
-             FROM books WHERE category = ? ORDER BY title COLLATE NOCASE",
-            slug
         )
         .fetch_all(&self.pool)
         .await
@@ -166,7 +139,7 @@ impl CatalogStore {
         sqlx::query_as!(
             BookRow,
             "SELECT id, file_path, title, author, language, description, modified,
-                    category, price_usd, lendable, cover_zip_path, cover_media_type
+                    price_usd, lendable, cover_zip_path, cover_media_type
              FROM books ORDER BY title COLLATE NOCASE"
         )
         .fetch_all(&self.pool)
@@ -209,7 +182,7 @@ impl CatalogStore {
 
         let sql = format!(
             "SELECT id, file_path, title, author, language, description, modified,
-                    category, price_usd, lendable, cover_zip_path, cover_media_type
+                    price_usd, lendable, cover_zip_path, cover_media_type
              FROM books WHERE {} ORDER BY title COLLATE NOCASE",
             clauses.join(" AND ")
         );
@@ -224,6 +197,115 @@ impl CatalogStore {
             .unwrap_or_default()
     }
 
+    // --- Categories ---
+
+    /// Non-empty categories with their book counts, ordered by label.
+    pub async fn categories(&self) -> Vec<(Category, u64)> {
+        sqlx::query!(
+            r#"SELECT c.slug AS "slug!", c.label AS "label!", COUNT(bc.book_id) AS "count!: i64"
+               FROM categories c
+               JOIN book_categories bc ON bc.category_slug = c.slug
+               GROUP BY c.slug, c.label
+               ORDER BY c.label COLLATE NOCASE"#
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(|r| (Category::new(r.slug, r.label), r.count as u64))
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// Look up a category by slug.
+    pub async fn category(&self, slug: &str) -> Option<Category> {
+        sqlx::query!("SELECT slug, label FROM categories WHERE slug = ?", slug)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| Category::new(r.slug, r.label))
+    }
+
+    /// All books in a category (by slug), ordered by title.
+    pub async fn books_in_category(&self, slug: &str) -> Vec<Book> {
+        sqlx::query_as!(
+            BookRow,
+            r#"SELECT b.id AS "id!", b.file_path, b.title AS "title!", b.author AS "author!",
+                      b.language, b.description, b.modified, b.price_usd,
+                      b.lendable AS "lendable!", b.cover_zip_path, b.cover_media_type
+               FROM books b
+               JOIN book_categories bc ON bc.book_id = b.id
+               WHERE bc.category_slug = ?
+               ORDER BY b.title COLLATE NOCASE"#,
+            slug
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map(into_books)
+        .unwrap_or_default()
+    }
+
+    /// The categories a book belongs to, ordered by label.
+    pub async fn book_categories(&self, book_id: &str) -> Vec<Category> {
+        sqlx::query!(
+            r#"SELECT c.slug AS "slug!", c.label AS "label!"
+               FROM categories c
+               JOIN book_categories bc ON bc.category_slug = c.slug
+               WHERE bc.book_id = ?
+               ORDER BY c.label COLLATE NOCASE"#,
+            book_id
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(|r| Category::new(r.slug, r.label))
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// Assign a category (by human-readable name) to a book, creating the
+    /// category on demand. Returns the stored category.
+    pub async fn assign_category(&self, book_id: &str, name: &str) -> Result<Category, sqlx::Error> {
+        let category = Category::new(catalog::slugify(name), name.trim());
+        self.seed_category(book_id, &category).await?;
+        // Reflect the stored label, which wins if the category already existed.
+        Ok(self.category(&category.slug).await.unwrap_or(category))
+    }
+
+    /// Remove a category from a book (idempotent).
+    pub async fn remove_category(&self, book_id: &str, slug: &str) {
+        let _ = sqlx::query!(
+            "DELETE FROM book_categories WHERE book_id = ? AND category_slug = ?",
+            book_id,
+            slug
+        )
+        .execute(&self.pool)
+        .await;
+    }
+
+    /// Create the category if needed and associate it with the book.
+    async fn seed_category(&self, book_id: &str, category: &Category) -> Result<(), sqlx::Error> {
+        sqlx::query!(
+            "INSERT OR IGNORE INTO categories (slug, label) VALUES (?, ?)",
+            category.slug,
+            category.label
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query!(
+            "INSERT OR IGNORE INTO book_categories (book_id, category_slug) VALUES (?, ?)",
+            book_id,
+            category.slug
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     // --- Mutations used at startup and by the watcher ---
 
     /// Replace the whole catalog with the built-in sample set.
@@ -232,9 +314,13 @@ impl CatalogStore {
             tracing::error!(?err, "failed to clear catalog");
             return;
         }
-        for book in catalog::sample_books() {
+        for (book, category) in catalog::sample_books() {
             if let Err(err) = self.insert(&book.id, &book, None).await {
                 tracing::error!(?err, id = %book.id, "failed to seed sample book");
+                continue;
+            }
+            if let Err(err) = self.seed_category(&book.id, &category).await {
+                tracing::error!(?err, id = %book.id, "failed to seed sample category");
             }
         }
     }
@@ -261,8 +347,8 @@ impl CatalogStore {
             }
             match crate::epub::read_meta(path) {
                 Ok(meta) => {
-                    let book = catalog::book_from_file(dir, path.clone(), meta);
-                    self.upsert_file(&book, mtime).await;
+                    let (book, category) = catalog::book_from_file(dir, path.clone(), meta);
+                    self.upsert_file(&book, mtime, &category).await;
                 }
                 Err(err) => {
                     tracing::warn!(?err, path = %path.display(), "skipping unreadable EPUB");
@@ -276,8 +362,9 @@ impl CatalogStore {
     }
 
     /// Insert or update a single file-backed book, keeping its id stable across
-    /// metadata changes.
-    pub async fn upsert_file(&self, book: &Book, mtime: Option<i64>) {
+    /// metadata changes. A newly-inserted book is filed under `default_category`;
+    /// updates leave a book's (possibly hand-edited) categories untouched.
+    pub async fn upsert_file(&self, book: &Book, mtime: Option<i64>, default_category: &Category) {
         let BookSource::File { path } = &book.source else {
             return;
         };
@@ -290,14 +377,13 @@ impl CatalogStore {
                 .ok()
                 .flatten();
 
-        let result: Result<(), sqlx::Error> = if existing.is_some() {
+        if existing.is_some() {
             let (cover_zip, cover_type) = cover_columns(book);
-            let slug = book.category.slug();
             let lendable = book.lendable as i64;
-            sqlx::query!(
+            if let Err(err) = sqlx::query!(
                 "UPDATE books SET file_mtime = ?, title = ?, author = ?, language = ?,
-                     description = ?, modified = ?, category = ?, price_usd = ?,
-                     lendable = ?, cover_zip_path = ?, cover_media_type = ?
+                     description = ?, modified = ?, price_usd = ?, lendable = ?,
+                     cover_zip_path = ?, cover_media_type = ?
                  WHERE file_path = ?",
                 mtime,
                 book.title,
@@ -305,7 +391,6 @@ impl CatalogStore {
                 book.language,
                 book.description,
                 book.modified,
-                slug,
                 book.price_usd,
                 lendable,
                 cover_zip,
@@ -314,13 +399,18 @@ impl CatalogStore {
             )
             .execute(&self.pool)
             .await
-            .map(|_| ())
+            {
+                tracing::error!(?err, path, "failed to update book");
+            }
         } else {
             let id = self.free_id(&book.id).await;
-            self.insert(&id, book, mtime).await
-        };
-        if let Err(err) = result {
-            tracing::error!(?err, path, "failed to store book");
+            if let Err(err) = self.insert(&id, book, mtime).await {
+                tracing::error!(?err, path, "failed to insert book");
+                return;
+            }
+            if let Err(err) = self.seed_category(&id, default_category).await {
+                tracing::error!(?err, path, "failed to seed book category");
+            }
         }
     }
 
@@ -355,13 +445,12 @@ impl CatalogStore {
             BookSource::Sample => None,
         };
         let (cover_zip, cover_type) = cover_columns(book);
-        let slug = book.category.slug();
         let lendable = book.lendable as i64;
         sqlx::query!(
             "INSERT INTO books (id, file_path, file_mtime, title, author, language,
-                 description, modified, category, price_usd, lendable,
+                 description, modified, price_usd, lendable,
                  cover_zip_path, cover_media_type)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             id,
             file_path,
             mtime,
@@ -370,7 +459,6 @@ impl CatalogStore {
             book.language,
             book.description,
             book.modified,
-            slug,
             book.price_usd,
             lendable,
             cover_zip,
