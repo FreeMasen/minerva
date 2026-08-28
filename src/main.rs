@@ -74,6 +74,20 @@ enum Command {
         /// The password; read from stdin if omitted.
         password: Option<String>,
     },
+    /// Set a book's title.
+    SetTitle { id: String, title: String },
+    /// Set a book's author.
+    SetAuthor { id: String, author: String },
+    /// Add a category to a book (created on demand).
+    AddCategory {
+        id: String,
+        /// The category's human-readable name.
+        name: String,
+    },
+    /// Remove a category (by slug) from a book.
+    RemoveCategory { id: String, slug: String },
+    /// Remove a book from the catalog.
+    RemoveBook { id: String },
 }
 
 /// Shared application state.
@@ -91,11 +105,59 @@ async fn main() -> anyhow::Result<()> {
     let mut cli = Cli::parse();
 
     match cli.command.take() {
-        Some(Command::Adduser { username, password }) => {
-            cmd_adduser(&cli.db, &username, password).await
-        }
         None => run_server(cli).await,
+        Some(command) => run_command(&cli.db, command).await,
     }
+}
+
+/// Run a management subcommand against the database and exit.
+async fn run_command(db_path: &FsPath, command: Command) -> anyhow::Result<()> {
+    if let Command::Adduser { username, password } = command {
+        return cmd_adduser(db_path, &username, password).await;
+    }
+
+    let store = CatalogStore::new(
+        db::connect(db_path)
+            .await
+            .with_context(|| format!("opening database {}", db_path.display()))?,
+    );
+
+    match command {
+        Command::Adduser { .. } => unreachable!("handled above"),
+        Command::SetTitle { id, title } => {
+            if store.set_title(&id, &title).await? {
+                println!("set title of '{id}' to {title:?}");
+            } else {
+                anyhow::bail!("no such book: {id}");
+            }
+        }
+        Command::SetAuthor { id, author } => {
+            if store.set_author(&id, &author).await? {
+                println!("set author of '{id}' to {author:?}");
+            } else {
+                anyhow::bail!("no such book: {id}");
+            }
+        }
+        Command::AddCategory { id, name } => {
+            if store.get(&id).await.is_none() {
+                anyhow::bail!("no such book: {id}");
+            }
+            let category = store.assign_category(&id, &name).await?;
+            println!("added category '{}' to '{id}'", category.slug);
+        }
+        Command::RemoveCategory { id, slug } => {
+            store.remove_category(&id, &slug).await;
+            println!("removed category '{slug}' from '{id}'");
+        }
+        Command::RemoveBook { id } => {
+            if store.remove_book(&id).await? {
+                println!("removed book '{id}'");
+            } else {
+                anyhow::bail!("no such book: {id}");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Start the catalog server.

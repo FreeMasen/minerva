@@ -459,6 +459,30 @@ impl CatalogStore {
         }
     }
 
+    /// Set a book's title. Returns whether a book with that id existed.
+    pub async fn set_title(&self, id: &str, title: &str) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query!("UPDATE books SET title = ? WHERE id = ?", title, id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Set a book's author. Returns whether a book with that id existed.
+    pub async fn set_author(&self, id: &str, author: &str) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query!("UPDATE books SET author = ? WHERE id = ?", author, id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Remove a book (and its category associations). Returns whether it existed.
+    pub async fn remove_book(&self, id: &str) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query!("DELETE FROM books WHERE id = ?", id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Delete the book backed by a specific file path, if any.
     pub async fn delete_by_path(&self, path: &Path) {
         let path = path.to_string_lossy();

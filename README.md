@@ -132,6 +132,22 @@ sqlx database create && sqlx migrate run   # one-time: create the dev database
 cargo sqlx prepare                         # refresh .sqlx/ — commit the result
 ```
 
+## Management subcommands
+
+Besides `adduser`, the binary offers subcommands for editing the catalog
+directly (they operate on `OPDS_DB` and exit):
+
+```sh
+cargo run -- set-title <id> "New Title"
+cargo run -- set-author <id> "New Author"
+cargo run -- add-category <id> "Science Fiction"   # created on demand
+cargo run -- remove-category <id> <category-slug>
+cargo run -- remove-book <id>
+```
+
+Note: for file-backed books, edits to title/author persist until the EPUB file
+changes and is re-scanned.
+
 ## Deployment
 
 A hardened systemd unit is provided at [`opds-axum.service`](opds-axum.service);
