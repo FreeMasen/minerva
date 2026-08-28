@@ -212,6 +212,7 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/opds", get(root_feed))
         .route("/opds/all", get(all_publications))
         .route("/opds/category/{slug}", get(category_feed))
+        .route("/opds/authors/{slug}", get(author_feed))
         .route("/opds/publications/{id}", get(publication))
         .route(
             "/opds/publications/{id}/categories",
@@ -425,27 +426,41 @@ async fn root_feed(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
     feed.groups = vec![new_group];
 
-    // A "Browse by Category" group: a navigation collection of the categories
-    // that currently have books. Omitted when there are none.
+    // "Browse by Category" and "Browse by Author" navigation groups. Each is
+    // omitted when empty.
     let categories = state.catalog.categories().await;
     if !categories.is_empty() {
-        feed.groups.push(Group {
-            metadata: Metadata::new("Browse by Category"),
-            links: Vec::new(),
-            navigation: categories
-                .into_iter()
-                .map(|(category, _count)| {
-                    Link::new(format!("{base}/opds/category/{}", category.slug))
-                        .with_rel("subsection")
-                        .with_type(FEED_MEDIA_TYPE)
-                        .with_title(category.label)
-                })
-                .collect(),
-            publications: Vec::new(),
-        });
+        feed.groups.push(browse_group(
+            base,
+            "Browse by Category",
+            "category",
+            categories,
+        ));
+    }
+    let authors = state.catalog.authors().await;
+    if !authors.is_empty() {
+        feed.groups.push(browse_group(base, "Browse by Author", "authors", authors));
     }
 
     Opds::feed(feed)
+}
+
+/// A navigation group of `subsection` links to `{base}/opds/{segment}/{slug}`.
+fn browse_group(base: &str, title: &str, segment: &str, entries: Vec<(catalog::Category, u64)>) -> Group {
+    Group {
+        metadata: Metadata::new(title),
+        links: Vec::new(),
+        navigation: entries
+            .into_iter()
+            .map(|(entry, _count)| {
+                Link::new(format!("{base}/opds/{segment}/{}", entry.slug))
+                    .with_rel("subsection")
+                    .with_type(FEED_MEDIA_TYPE)
+                    .with_title(entry.label)
+            })
+            .collect(),
+        publications: Vec::new(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -538,6 +553,33 @@ async fn category_feed(
             .with_rel("up")
             .with_type(FEED_MEDIA_TYPE),
     );
+
+    feed.metadata.number_of_items = Some(books.len() as u64);
+    feed.publications = books.iter().map(|b| b.to_publication(base)).collect();
+
+    Opds::feed(feed).into_response()
+}
+
+/// An acquisition feed of everything by a single author.
+async fn author_feed(State(state): State<Arc<AppState>>, Path(slug): Path<String>) -> Response {
+    let base = &state.base_url;
+
+    let Some(author) = state.catalog.author_by_slug(&slug).await else {
+        return not_found("No such author");
+    };
+    let books = state.catalog.books_by_author(&author).await;
+
+    let mut feed = Feed::new(author, format!("{base}/opds/authors/{slug}"))
+        .with_link(
+            Link::new(format!("{base}/opds"))
+                .with_rel("start")
+                .with_type(FEED_MEDIA_TYPE),
+        )
+        .with_link(
+            Link::new(format!("{base}/opds/all"))
+                .with_rel("up")
+                .with_type(FEED_MEDIA_TYPE),
+        );
 
     feed.metadata.number_of_items = Some(books.len() as u64);
     feed.publications = books.iter().map(|b| b.to_publication(base)).collect();
@@ -961,25 +1003,26 @@ mod tests {
     async fn root_feed_has_groups() {
         let (_, _, json) = get("/opds").await;
         let groups = json["groups"].as_array().expect("groups array");
-        assert_eq!(groups.len(), 2);
+
+        let group = |title: &str| {
+            groups
+                .iter()
+                .find(|g| g["metadata"]["title"] == title)
+                .unwrap_or_else(|| panic!("missing group {title}"))
+                .clone()
+        };
 
         // A publications group previewing recent titles, with a self link.
-        let new = &groups[0];
-        assert_eq!(new["metadata"]["title"], "New Publications");
+        let new = group("New Publications");
         assert_eq!(new["metadata"]["numberOfItems"], 5);
         assert!(!new["publications"].as_array().unwrap().is_empty());
-        assert!(
-            new["links"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|l| l["rel"] == "self")
-        );
+        assert!(new["links"].as_array().unwrap().iter().any(|l| l["rel"] == "self"));
 
-        // A navigation group listing the category feeds.
-        let browse = &groups[1];
-        assert_eq!(browse["metadata"]["title"], "Browse by Category");
-        assert_eq!(browse["navigation"].as_array().unwrap().len(), 2);
+        // Navigation groups over the two genre categories and the five authors.
+        let by_category = group("Browse by Category");
+        assert_eq!(by_category["navigation"].as_array().unwrap().len(), 2);
+        let by_author = group("Browse by Author");
+        assert_eq!(by_author["navigation"].as_array().unwrap().len(), 5);
     }
 
     #[tokio::test]

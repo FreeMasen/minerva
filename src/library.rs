@@ -287,6 +287,50 @@ impl CatalogStore {
         .await;
     }
 
+    // --- Authors (a category-like browse dimension derived from the author
+    // column, so no per-book associations are stored) ---
+
+    /// Distinct authors with a URL slug and book count, ordered by name.
+    pub async fn authors(&self) -> Vec<(Category, u64)> {
+        sqlx::query!(
+            r#"SELECT author AS "author!", COUNT(*) AS "count!: i64"
+               FROM books GROUP BY author ORDER BY author COLLATE NOCASE"#
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(|r| (Category::new(catalog::slugify(&r.author), r.author), r.count as u64))
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// The author name matching a slug, if any.
+    pub async fn author_by_slug(&self, slug: &str) -> Option<String> {
+        sqlx::query_scalar!(r#"SELECT DISTINCT author AS "author!" FROM books"#)
+            .fetch_all(&self.pool)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .find(|author| catalog::slugify(author) == slug)
+    }
+
+    /// All books by an author, ordered by title.
+    pub async fn books_by_author(&self, author: &str) -> Vec<Book> {
+        sqlx::query_as!(
+            BookRow,
+            "SELECT id, file_path, title, author, language, description, modified,
+                    price_usd, lendable, cover_zip_path, cover_media_type
+             FROM books WHERE author = ? ORDER BY title COLLATE NOCASE",
+            author
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map(into_books)
+        .unwrap_or_default()
+    }
+
     /// Create the category if needed and associate it with the book.
     async fn seed_category(&self, book_id: &str, category: &Category) -> Result<(), sqlx::Error> {
         sqlx::query!(

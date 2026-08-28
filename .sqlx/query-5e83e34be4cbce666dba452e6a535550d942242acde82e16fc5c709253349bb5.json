@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT author AS \"author!\", COUNT(*) AS \"count!: i64\"\n               FROM books GROUP BY author ORDER BY author COLLATE NOCASE",
+  "describe": {
+    "columns": [
+      {
+        "name": "author!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "count!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "5e83e34be4cbce666dba452e6a535550d942242acde82e16fc5c709253349bb5"
+}
