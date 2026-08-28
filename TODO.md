@@ -1,20 +1,30 @@
 # Plan / deferred work
 
-- use walkdir for collecting ebooks instead of rolling it yourself
-- timestamps should be based on jiff types instead of strings
 - make a pass at reducing allocation, especially for duplicated string allocations
-- Server Admin
-  - Add cli subcommands for updating database entries
-  - add a web page for managing the collection
-    - Upload
-    - Add Category
-    - Remove Category
-    - Remove Book
-    - Change Properties (i.e title, author)
-    - UI via tera for templating
-- Ensure authors can be used as categories
-- use the base64 crate instead of rolling that yourself
-- move the assets.rs and sample_books to be exclusively available for tests
+  (assessed: no significant duplicated-allocation hotspot for this workload;
+  revisit if a specific path is profiled)
+- move assets.rs and sample_books to be exclusively available for tests
+  (NEEDS A DECISION — conflicts with runtime: `assets::cover_svg` (placeholder
+  covers) and `assets::thumbnail` (cover resizing) are used serving real books,
+  and `sample_books` backs the default no-library catalog. Gating the whole of
+  assets/samples behind cfg(test) would break cover serving and empty the
+  default catalog. Options: (a) gate only `sample_books` + `epub_bytes` (the
+  demo-only parts) and drop the built-in sample catalog so a library dir is
+  required; (b) leave as-is. Which?)
+
+## Done (recent batch)
+
+- **walkdir** — `catalog::epub_paths` uses walkdir instead of a hand-rolled walk.
+- **jiff timestamps** — `Book::modified` is a `jiff::Timestamp`, parsed/formatted
+  at the DB, EPUB, and wire boundaries.
+- **Authors as categories** — a "Browse by Author" group and `/opds/authors/{slug}`
+  feeds, derived from the author column.
+- **Server admin** — CLI subcommands (set-title/set-author/add-category/
+  remove-category/remove-book) and a tera-templated web UI at `/admin`
+  (edit properties, add/remove categories, remove book, upload EPUB).
+- **base64 crate** — replaced the hand-rolled base64 module.
+- **Data-driven categories** — many-to-many `categories`/`book_categories`
+  tables with assign/remove endpoints.
 
 ## Done
 
