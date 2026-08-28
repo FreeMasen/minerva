@@ -1,94 +1,103 @@
 //! Watch the library directory and keep the SQLite catalog in sync.
 //!
-//! `notify` runs its filesystem backend on its own thread and invokes a
-//! synchronous callback there. That callback does nothing but forward events
-//! over a channel; an async task owns the receiver (and the catalog store) and
-//! does the real work, so there is no blocking bridge back into the runtime.
+//! `notify-debouncer-full` runs the filesystem backend on its own thread,
+//! coalesces bursts of events, and (after a quiet period) invokes a synchronous
+//! callback with the settled set of changes. That callback only forwards the
+//! result over a channel; an async task owns the receiver and the catalog store
+//! and does the real work, so there is no blocking bridge back into the runtime.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use notify::{RecursiveMode, Watcher};
+use notify::event::ModifyKind;
+use notify::{EventKind, RecursiveMode, Watcher};
+use notify_debouncer_full::{DebounceEventResult, DebouncedEvent, new_debouncer};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 use crate::catalog::{self, book_from_file};
 use crate::library::CatalogStore;
 
-/// A filesystem event as delivered by `notify`.
-type Event = Result<notify::Event, notify::Error>;
-
-/// How long to wait for the event stream to go quiet before reacting.
-const DEBOUNCE: Duration = Duration::from_millis(300);
+/// How long the event stream must be quiet before a batch is delivered.
+const DEBOUNCE: Duration = Duration::from_millis(500);
 
 /// Start watching `dir`, updating `store` as EPUBs are added, changed or
 /// removed. Returns an error if the watch can't be established.
 pub fn spawn(dir: PathBuf, store: Arc<CatalogStore>) -> anyhow::Result<()> {
     let (tx, rx) = mpsc::unbounded_channel();
 
-    // The notify callback runs on notify's own thread; just forward events.
-    let mut watcher = notify::recommended_watcher(move |event| {
-        let _ = tx.send(event);
+    // The debouncer callback runs on its own thread; just forward the batch.
+    let mut debouncer = new_debouncer(DEBOUNCE, None, move |result| {
+        let _ = tx.send(result);
     })?;
-    watcher.watch(&dir, RecursiveMode::Recursive)?;
+    debouncer
+        .watcher()
+        .watch(&dir, RecursiveMode::Recursive)?;
+    // Seed the rename-tracking cache so directory renames are reported.
+    debouncer.cache().add_root(&dir, RecursiveMode::Recursive);
     tracing::info!(dir = %dir.display(), "watching library directory for changes");
 
-    // The async task owns the watcher (keeping it alive), the receiver and the
-    // store, and reacts to events without leaving the runtime.
+    // The async task owns the debouncer (keeping it alive), the receiver and the
+    // store, and reacts to settled batches without leaving the runtime.
     tokio::spawn(async move {
-        let _watcher = watcher;
+        let _debouncer = debouncer;
         process_events(dir, store, rx).await;
     });
     Ok(())
 }
 
-/// Debounce bursts of events and apply each settled batch to the store.
-async fn process_events(dir: PathBuf, store: Arc<CatalogStore>, mut rx: UnboundedReceiver<Event>) {
-    while let Some(first) = rx.recv().await {
-        // Coalesce a burst (a file copy emits many events) before reacting.
-        let mut batch = vec![first];
-        loop {
-            match tokio::time::timeout(DEBOUNCE, rx.recv()).await {
-                Ok(Some(event)) => batch.push(event),
-                // Quiet period reached (Err) or channel closed (None).
-                Ok(None) | Err(_) => break,
+/// Apply each settled batch of events to the store.
+async fn process_events(
+    dir: PathBuf,
+    store: Arc<CatalogStore>,
+    mut rx: UnboundedReceiver<DebounceEventResult>,
+) {
+    while let Some(result) = rx.recv().await {
+        let events = match result {
+            Ok(events) => events,
+            Err(errors) => {
+                for error in errors {
+                    tracing::warn!(%error, "filesystem watch error");
+                }
+                // Errors (e.g. a dropped/overflowed backend queue) may mean we
+                // missed changes; reconcile to be safe.
+                store.reconcile_dir(&dir).await;
+                continue;
             }
-        }
+        };
 
-        if apply_batch(&dir, &store, batch).await {
+        if apply_batch(&dir, &store, events).await {
             let count = store.count().await;
             tracing::info!(count, "catalog updated after filesystem change");
         }
     }
 }
 
-/// Apply a coalesced batch of events to the store. Returns whether anything
-/// changed. File-level changes are applied surgically; directory-level changes
-/// trigger a full reconcile.
-async fn apply_batch(dir: &Path, store: &CatalogStore, batch: Vec<Event>) -> bool {
+/// Apply a settled batch of events to the store. Returns whether anything
+/// changed. EPUB paths are applied surgically; a *structural* directory change
+/// (create/remove/rename) triggers a full reconcile, while a directory merely
+/// being modified because a child changed is ignored.
+async fn apply_batch(dir: &Path, store: &CatalogStore, events: Vec<DebouncedEvent>) -> bool {
     let mut affected: HashSet<PathBuf> = HashSet::new();
     let mut full_reconcile = false;
 
-    for result in batch {
-        let event = match result {
-            Ok(event) => event,
-            Err(_) => {
-                full_reconcile = true;
-                continue;
-            }
-        };
-        for path in event.paths {
-            if catalog::is_epub(&path) {
-                affected.insert(path);
-            } else if path.is_dir() {
-                // A directory appeared or was renamed into place.
-                full_reconcile = true;
-            } else if !path.exists() && store.has_books_under(&path).await {
-                // A directory that held books was removed.
+    for event in events {
+        let structural = matches!(
+            event.kind,
+            EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
+        );
+        for path in &event.paths {
+            if catalog::is_epub(path) {
+                affected.insert(path.clone());
+            } else if structural
+                && (path.is_dir() || (!path.exists() && store.has_books_under(path).await))
+            {
+                // A directory that (now) exists was created/renamed, or one that
+                // held books was removed.
                 full_reconcile = true;
             }
-            // Otherwise a non-EPUB file (e.g. .DS_Store): ignore.
+            // Otherwise a non-EPUB file, or a directory merely modified: ignore.
         }
     }
 
@@ -105,18 +114,12 @@ async fn apply_batch(dir: &Path, store: &CatalogStore, batch: Vec<Event>) -> boo
         if path.is_file() {
             match crate::epub::read_meta(&path) {
                 Ok(meta) => {
-                    let mtime = std::fs::metadata(&path)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs() as i64);
+                    let mtime = file_mtime(&path);
                     store
                         .upsert_file(&book_from_file(dir, path, meta), mtime)
                         .await;
                 }
                 Err(err) => {
-                    // Treat an unreadable/half-written file as absent for now; a
-                    // later event once the write settles will re-add it.
                     tracing::warn!(%err, path = %path.display(), "dropping unreadable EPUB");
                     store.delete_by_path(&path).await;
                 }
@@ -127,4 +130,13 @@ async fn apply_batch(dir: &Path, store: &CatalogStore, batch: Vec<Event>) -> boo
     }
 
     true
+}
+
+/// A file's modification time as Unix seconds.
+fn file_mtime(path: &Path) -> Option<i64> {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
 }
