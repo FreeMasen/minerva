@@ -5,6 +5,7 @@
 //! deliberately slow, so it runs on a blocking thread. Account management is
 //! done out-of-band via the `adduser` CLI subcommand.
 
+use anyhow::Context;
 use argon2::Argon2;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use rand_core::OsRng;
@@ -35,12 +36,12 @@ impl AuthStore {
         username: &str,
         password: &str,
         display_name: Option<&str>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<()> {
         let owned = password.to_string();
         let hash = tokio::task::spawn_blocking(move || hash_password(&owned))
             .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?;
+            .context("password hashing task failed")?
+            .map_err(|e| anyhow::anyhow!("hashing password: {e}"))?;
 
         sqlx::query!(
             "INSERT INTO users (username, password_hash, display_name)
@@ -53,7 +54,8 @@ impl AuthStore {
             display_name,
         )
         .execute(&self.pool)
-        .await?;
+        .await
+        .context("storing user")?;
         Ok(())
     }
 

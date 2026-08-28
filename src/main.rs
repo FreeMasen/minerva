@@ -30,6 +30,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 
@@ -46,15 +47,15 @@ const AUTH_REALM: &str = "OPDS catalog";
 #[command(name = "opds-axum", version, about)]
 struct Cli {
     /// Externally-visible base URL used to build absolute hrefs.
-    #[arg(long, env = "OPDS_BASE_URL", default_value = "http://localhost:3000")]
+    #[arg(long, short = 'u', env = "OPDS_BASE_URL", default_value = "http://localhost:3000")]
     base_url: String,
 
     /// SQLite database holding the catalog and user accounts.
-    #[arg(long, env = "OPDS_DB", default_value = "opds.db", global = true)]
+    #[arg(long, short, env = "OPDS_DB", default_value = "opds.db", global = true)]
     db: PathBuf,
 
     /// Directory of EPUB files to serve instead of the built-in samples.
-    #[arg(long, env = "OPDS_LIBRARY_DIR")]
+    #[arg(long, short, env = "OPDS_LIBRARY_DIR")]
     library_dir: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -83,22 +84,19 @@ struct AppState {
 }
 
 #[tokio::main]
-async fn main() {
-    let cli = Cli::parse();
+async fn main() -> anyhow::Result<()> {
+    let mut cli = Cli::parse();
 
-    match &cli.command {
+    match cli.command.take() {
         Some(Command::Adduser { username, password }) => {
-            if let Err(err) = cmd_adduser(&cli.db, username, password.clone()).await {
-                eprintln!("adduser: {err}");
-                std::process::exit(1);
-            }
+            cmd_adduser(&cli.db, &username, password).await
         }
         None => run_server(cli).await,
     }
 }
 
 /// Start the catalog server.
-async fn run_server(cli: Cli) {
+async fn run_server(cli: Cli) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -107,10 +105,9 @@ async fn run_server(cli: Cli) {
         .init();
 
     // One SQLite database holds both the catalog and the user accounts.
-    let pool = db::connect(&cli.db).await.unwrap_or_else(|err| {
-        eprintln!("failed to open database ({}): {err}", cli.db.display());
-        std::process::exit(1);
-    });
+    let pool = db::connect(&cli.db)
+        .await
+        .with_context(|| format!("opening database {}", cli.db.display()))?;
     let catalog = Arc::new(CatalogStore::new(pool.clone()));
 
     // A library directory reconciles the catalog against a directory of EPUBs;
@@ -150,9 +147,14 @@ async fn run_server(cli: Cli) {
     });
 
     let addr = "0.0.0.0:3000";
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("binding {addr}"))?;
     tracing::info!("OPDS server listening on http://{addr}/opds");
-    axum::serve(listener, app(state)).await.unwrap();
+    axum::serve(listener, app(state))
+        .await
+        .context("server error")?;
+    Ok(())
 }
 
 /// Create or update an account in the database at `db_path`. When no password
@@ -161,16 +163,20 @@ async fn cmd_adduser(
     db_path: &FsPath,
     username: &str,
     password: Option<String>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> anyhow::Result<()> {
     let password = match password {
         Some(password) => password,
-        None => prompt_password()?,
+        None => prompt_password().context("reading password")?,
     };
     if password.is_empty() {
-        return Err("password must not be empty".into());
+        anyhow::bail!("password must not be empty");
     }
 
-    let store = AuthStore::new(db::connect(db_path).await?);
+    let store = AuthStore::new(
+        db::connect(db_path)
+            .await
+            .with_context(|| format!("opening database {}", db_path.display()))?,
+    );
     store.add_user(username, &password, None).await?;
     println!("user '{username}' saved to {}", db_path.display());
     Ok(())
