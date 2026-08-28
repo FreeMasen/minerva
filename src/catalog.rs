@@ -185,7 +185,7 @@ impl Book {
     /// Build the OPDS `Publication` (as embedded in a feed) for this book.
     pub fn to_publication(&self, base: &str) -> Publication {
         let mut metadata = Metadata::new(self.title.clone());
-        metadata.type_ = Some("http://schema.org/Book".to_string());
+        metadata.r#type = Some("http://schema.org/Book".to_string());
         metadata.identifier = Some(format!("urn:opds:book:{}", self.id));
         metadata.author = Some(Contributor::new(self.author.clone()));
         metadata.language = self.language.clone();
@@ -201,7 +201,7 @@ impl Book {
         // page), described by indirectAcquisition.
         let epub_indirect = || {
             vec![IndirectAcquisition {
-                type_: "application/epub+zip".to_string(),
+                r#type: "application/epub+zip".to_string(),
                 child: Vec::new(),
             }]
         };

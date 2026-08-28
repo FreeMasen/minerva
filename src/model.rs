@@ -33,7 +33,7 @@ pub struct AuthenticationDocument {
 pub struct AuthenticationFlow {
     /// The flow type URI, e.g. `http://opds-spec.org/auth/basic`.
     #[serde(rename = "type")]
-    pub type_: String,
+    pub r#type: String,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<AuthLabels>,
@@ -99,7 +99,7 @@ impl Feed {
 pub struct Metadata {
     /// The schema.org type, serialized as `@type`, e.g. `http://schema.org/Book`.
     #[serde(rename = "@type", skip_serializing_if = "Option::is_none")]
-    pub type_: Option<String>,
+    pub r#type: Option<String>,
 
     pub title: String,
 
@@ -173,7 +173,7 @@ pub struct Link {
     pub rel: Option<Rel>,
 
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-    pub type_: Option<String>,
+    pub r#type: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -198,7 +198,7 @@ impl Link {
         Link {
             href: href.into(),
             rel: None,
-            type_: None,
+            r#type: None,
             title: None,
             templated: None,
             properties: None,
@@ -217,7 +217,7 @@ impl Link {
     }
 
     pub fn with_type(mut self, media_type: impl Into<String>) -> Self {
-        self.type_ = Some(media_type.into());
+        self.r#type = Some(media_type.into());
         self
     }
 
@@ -325,7 +325,7 @@ pub struct Price {
 #[derive(Debug, Clone, Serialize)]
 pub struct IndirectAcquisition {
     #[serde(rename = "type")]
-    pub type_: String,
+    pub r#type: String,
 
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub child: Vec<IndirectAcquisition>,

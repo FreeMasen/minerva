@@ -20,7 +20,7 @@ OPDS_BASE_URL=https://books.example.com cargo run
 # serve a real library: scan a directory of EPUB files instead of the samples
 OPDS_LIBRARY_DIR=/path/to/epubs cargo run
 # add an account (stored in the same OPDS_DB); the catalog then requires login
-cargo run adduser alice        # prompts for a password
+cargo run adduser alice        # prompts for a password (hidden, confirmed)
 cargo run                      # HTTP Basic auth is enforced while any account exists
 ```
 

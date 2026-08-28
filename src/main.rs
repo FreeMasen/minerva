@@ -167,7 +167,7 @@ async fn cmd_adduser(
 ) -> anyhow::Result<()> {
     let password = match password {
         Some(password) => password,
-        None => prompt_password().context("reading password")?,
+        None => prompt_password()?,
     };
     if password.is_empty() {
         anyhow::bail!("password must not be empty");
@@ -183,14 +183,22 @@ async fn cmd_adduser(
     Ok(())
 }
 
-/// Read a password from stdin (kept out of argv/shell history). Not hidden.
-fn prompt_password() -> std::io::Result<String> {
-    use std::io::{BufRead, Write};
-    eprint!("Password: ");
-    std::io::stderr().flush()?;
-    let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line)?;
-    Ok(line.trim_end_matches(['\n', '\r']).to_string())
+/// Prompt for a password on the terminal: hidden input, confirmed by retyping,
+/// and rejected if empty.
+fn prompt_password() -> anyhow::Result<String> {
+    use inquire::Password;
+    use inquire::validator::Validation;
+
+    Password::new("Password:")
+        .with_validator(|input: &str| {
+            if input.trim().is_empty() {
+                Ok(Validation::Invalid("Password must not be empty".into()))
+            } else {
+                Ok(Validation::Valid)
+            }
+        })
+        .prompt()
+        .context("reading password")
 }
 
 /// Build the application router. Kept separate from `main` so tests can drive
@@ -267,7 +275,7 @@ fn auth_document_body(state: &AppState) -> AuthenticationDocument {
         id: format!("{base}/opds/auth"),
         title: AUTH_REALM.to_string(),
         authentication: vec![AuthenticationFlow {
-            type_: "http://opds-spec.org/auth/basic".to_string(),
+            r#type: "http://opds-spec.org/auth/basic".to_string(),
             labels: Some(AuthLabels {
                 login: "Username".to_string(),
                 password: "Password".to_string(),
