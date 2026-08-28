@@ -140,7 +140,7 @@ async fn run_server(cli: Cli) -> anyhow::Result<()> {
     // Reflect additions/removals in the library directory as they happen.
     if let Some(dir) = library_dir {
         if let Err(err) = watch::spawn(dir, catalog.clone()) {
-            tracing::warn!(%err, "failed to start the library watcher");
+            tracing::warn!(?err, "failed to start the library watcher");
         }
     }
 
@@ -346,7 +346,7 @@ impl<T: serde::Serialize> IntoResponse for Opds<T> {
         match serde_json::to_vec(&self.value) {
             Ok(body) => ([(header::CONTENT_TYPE, self.media_type)], body).into_response(),
             Err(err) => {
-                tracing::error!(%err, "failed to serialize OPDS document");
+                tracing::error!(?err, "failed to serialize OPDS document");
                 StatusCode::INTERNAL_SERVER_ERROR.into_response()
             }
         }
@@ -619,7 +619,7 @@ async fn download(State(state): State<Arc<AppState>>, Path(file): Path<String>) 
             match tokio::fs::read(&path).await {
                 Ok(bytes) => epub_response(&filename, bytes),
                 Err(err) => {
-                    tracing::error!(%err, path = %path.display(), "failed to read EPUB file");
+                    tracing::error!(?err, path = %path.display(), "failed to read EPUB file");
                     not_found("Publication file is unavailable")
                 }
             }
@@ -714,10 +714,10 @@ async fn serve_cover(state: Arc<AppState>, id: String, thumbnail: bool) -> Respo
                 return ([(header::CONTENT_TYPE, content_type)], bytes).into_response();
             }
             Ok(Err(err)) => {
-                tracing::warn!(%err, id, "failed to read embedded cover; using placeholder");
+                tracing::warn!(?err, id, "failed to read embedded cover; using placeholder");
             }
             Err(err) => {
-                tracing::error!(%err, "cover read task panicked");
+                tracing::error!(?err, "cover read task panicked");
             }
         }
     }

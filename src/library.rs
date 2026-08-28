@@ -229,12 +229,12 @@ impl CatalogStore {
     /// Replace the whole catalog with the built-in sample set.
     pub async fn reset_to_samples(&self) {
         if let Err(err) = sqlx::query!("DELETE FROM books").execute(&self.pool).await {
-            tracing::error!(%err, "failed to clear catalog");
+            tracing::error!(?err, "failed to clear catalog");
             return;
         }
         for book in catalog::sample_books() {
             if let Err(err) = self.insert(&book.id, &book, None).await {
-                tracing::error!(%err, id = %book.id, "failed to seed sample book");
+                tracing::error!(?err, id = %book.id, "failed to seed sample book");
             }
         }
     }
@@ -265,7 +265,7 @@ impl CatalogStore {
                     self.upsert_file(&book, mtime).await;
                 }
                 Err(err) => {
-                    tracing::warn!(%err, path = %path.display(), "skipping unreadable EPUB");
+                    tracing::warn!(?err, path = %path.display(), "skipping unreadable EPUB");
                 }
             }
         }
@@ -320,7 +320,7 @@ impl CatalogStore {
             self.insert(&id, book, mtime).await
         };
         if let Err(err) = result {
-            tracing::error!(%err, path, "failed to store book");
+            tracing::error!(?err, path, "failed to store book");
         }
     }
 

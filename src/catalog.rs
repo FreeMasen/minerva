@@ -135,7 +135,7 @@ pub(crate) fn epub_paths(root: &Path) -> Vec<PathBuf> {
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(err) => {
-                tracing::warn!(%err, dir = %dir.display(), "cannot read directory");
+                tracing::warn!(?err, dir = %dir.display(), "cannot read directory");
                 continue;
             }
         };

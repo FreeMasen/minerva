@@ -58,7 +58,7 @@ async fn process_events(
             Ok(events) => events,
             Err(errors) => {
                 for error in errors {
-                    tracing::warn!(%error, "filesystem watch error");
+                    tracing::warn!(?error, "filesystem watch error");
                 }
                 // Errors (e.g. a dropped/overflowed backend queue) may mean we
                 // missed changes; reconcile to be safe.
@@ -120,7 +120,7 @@ async fn apply_batch(dir: &Path, store: &CatalogStore, events: Vec<DebouncedEven
                         .await;
                 }
                 Err(err) => {
-                    tracing::warn!(%err, path = %path.display(), "dropping unreadable EPUB");
+                    tracing::warn!(?err, path = %path.display(), "dropping unreadable EPUB");
                     store.delete_by_path(&path).await;
                 }
             }
