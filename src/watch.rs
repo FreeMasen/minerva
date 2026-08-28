@@ -6,6 +6,9 @@
 //! result over a channel; an async task owns the receiver and the catalog store
 //! and does the real work, so there is no blocking bridge back into the runtime.
 
+/// How long the event stream must be quiet before a batch is delivered.
+const DEBOUNCE: Duration = Duration::from_millis(500);
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,9 +21,6 @@ use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 use crate::catalog::{self, book_from_file};
 use crate::library::CatalogStore;
-
-/// How long the event stream must be quiet before a batch is delivered.
-const DEBOUNCE: Duration = Duration::from_millis(500);
 
 /// Start watching `dir`, updating `store` as EPUBs are added, changed or
 /// removed. Returns an error if the watch can't be established.

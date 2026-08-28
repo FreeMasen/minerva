@@ -6,14 +6,14 @@
 //!
 //! See <https://specs.opds.io/opds-2.0.html>.
 
-use serde::Serialize;
-
 /// Media type for an OPDS 2.0 feed.
 pub const FEED_MEDIA_TYPE: &str = "application/opds+json";
 /// Media type for a single OPDS publication.
 pub const PUBLICATION_MEDIA_TYPE: &str = "application/opds-publication+json";
 /// Media type for an Authentication for OPDS document.
 pub const AUTH_MEDIA_TYPE: &str = "application/opds-authentication+json";
+
+use serde::Serialize;
 
 /// An Authentication for OPDS document, describing how a client may
 /// authenticate. Returned with 401 from protected resources and served

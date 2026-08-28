@@ -9,6 +9,12 @@
 //! (set `OPDS_LIBRARY_DIR`) that is scanned for metadata and covers and kept in
 //! sync as files are added or removed.
 
+/// The HTTP Basic realm advertised to clients.
+const AUTH_REALM: &str = "OPDS catalog";
+
+/// Number of publications served per page in acquisition feeds.
+const PAGE_SIZE: u64 = 3;
+
 mod assets;
 mod auth;
 mod base64;
@@ -38,9 +44,6 @@ use crate::auth::AuthStore;
 use crate::catalog::{BookSource, Category};
 use crate::library::CatalogStore;
 use crate::model::*;
-
-/// The HTTP Basic realm advertised to clients.
-const AUTH_REALM: &str = "OPDS catalog";
 
 /// An OPDS 2.0 catalog server built on Axum.
 #[derive(Parser)]
@@ -268,27 +271,6 @@ fn extract_basic(headers: &HeaderMap) -> Option<(String, String)> {
     Some((user.to_string(), pass.to_string()))
 }
 
-/// Build the Authentication for OPDS document describing how to log in.
-fn auth_document_body(state: &AppState) -> AuthenticationDocument {
-    let base = &state.base_url;
-    AuthenticationDocument {
-        id: format!("{base}/opds/auth"),
-        title: AUTH_REALM.to_string(),
-        authentication: vec![AuthenticationFlow {
-            r#type: "http://opds-spec.org/auth/basic".to_string(),
-            labels: Some(AuthLabels {
-                login: "Username".to_string(),
-                password: "Password".to_string(),
-            }),
-        }],
-        links: vec![
-            Link::new(format!("{base}/opds"))
-                .with_rel("start")
-                .with_type(FEED_MEDIA_TYPE),
-        ],
-    }
-}
-
 /// The 401 challenge response, with the auth document as its body.
 fn unauthorized(state: &AppState) -> Response {
     let body = serde_json::to_vec(&auth_document_body(state)).unwrap_or_default();
@@ -316,8 +298,26 @@ async fn auth_document(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
-/// Number of publications served per page in acquisition feeds.
-const PAGE_SIZE: u64 = 3;
+/// Build the Authentication for OPDS document describing how to log in.
+fn auth_document_body(state: &AppState) -> AuthenticationDocument {
+    let base = &state.base_url;
+    AuthenticationDocument {
+        id: format!("{base}/opds/auth"),
+        title: AUTH_REALM.to_string(),
+        authentication: vec![AuthenticationFlow {
+            r#type: "http://opds-spec.org/auth/basic".to_string(),
+            labels: Some(AuthLabels {
+                login: "Username".to_string(),
+                password: "Password".to_string(),
+            }),
+        }],
+        links: vec![
+            Link::new(format!("{base}/opds"))
+                .with_rel("start")
+                .with_type(FEED_MEDIA_TYPE),
+        ],
+    }
+}
 
 /// A response that serializes a value to JSON with an OPDS media type.
 struct Opds<T: serde::Serialize> {
