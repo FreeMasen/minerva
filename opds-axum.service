@@ -1,0 +1,77 @@
+# systemd service for the opds-axum catalog server.
+#
+# Install:
+#   cargo build --release
+#   sudo install -Dm755 target/release/opds-axum /usr/local/bin/opds-axum
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin opds
+#   sudo install -Dm644 opds-axum.service /etc/systemd/system/opds-axum.service
+#   # optionally drop config in /etc/opds-axum/opds-axum.env (see EnvironmentFile below)
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now opds-axum
+#
+# Logs: journalctl -u opds-axum -f   (level via RUST_LOG below)
+
+[Unit]
+Description=opds-axum OPDS 2.0 catalog server
+Documentation=https://specs.opds.io/opds-2.0.html
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/opds-axum
+
+# --- Configuration ---------------------------------------------------------
+# The catalog + user database lives in the state directory below. Point
+# OPDS_LIBRARY_DIR at a directory of EPUBs to serve a real library (otherwise
+# the built-in samples are served). Override any of these in the env file.
+Environment=OPDS_DB=/var/lib/opds-axum/opds.db
+Environment=OPDS_BASE_URL=http://localhost:3000
+#Environment=OPDS_LIBRARY_DIR=/srv/books
+Environment=RUST_LOG=opds_axum=info,tower_http=info,warn
+EnvironmentFile=-/etc/opds-axum/opds-axum.env
+
+# --- Identity & state ------------------------------------------------------
+# A dedicated unprivileged user. StateDirectory creates and owns
+# /var/lib/opds-axum (0700) for the SQLite database (and its -wal/-shm files).
+User=opds
+Group=opds
+StateDirectory=opds-axum
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/opds-axum
+
+Restart=on-failure
+RestartSec=5
+
+# --- Hardening -------------------------------------------------------------
+# The server binds an unprivileged port (3000) and needs no capabilities.
+# If you serve on a privileged port (e.g. 80/443), add:
+#   AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/opds-axum
+PrivateTmp=true
+PrivateDevices=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectProc=invisible
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=077
+
+[Install]
+WantedBy=multi-user.target

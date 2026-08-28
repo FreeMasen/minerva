@@ -124,6 +124,13 @@ sqlx database create && sqlx migrate run   # one-time: create the dev database
 cargo sqlx prepare                         # refresh .sqlx/ — commit the result
 ```
 
+## Deployment
+
+A hardened systemd unit is provided at [`opds-axum.service`](opds-axum.service);
+its header comments cover installing the binary, creating the service user, and
+configuring it (env vars or `/etc/opds-axum/opds-axum.env`). The catalog
+database lives in `/var/lib/opds-axum`.
+
 ## Layout
 
 - `src/model.rs` — serde types for the OPDS 2.0 wire format.
