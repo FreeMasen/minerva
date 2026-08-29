@@ -415,45 +415,26 @@ impl CatalogStore {
         };
         let path = path.to_string_lossy().into_owned();
 
-        let existing: Option<String> =
-            sqlx::query_scalar!("SELECT id FROM books WHERE file_path = ?", path)
-                .fetch_optional(&self.pool)
-                .await
-                .ok()
-                .flatten();
-
-        if existing.is_some() {
-            let (cover_zip, cover_type) = cover_columns(book);
-            let lendable = book.lendable as i64;
-            let modified = book.modified.as_ref().map(jiff::Timestamp::to_string);
-            if let Err(err) = sqlx::query!(
-                "UPDATE books SET file_mtime = ?, title = ?, author = ?, language = ?,
-                     description = ?, modified = ?, price_usd = ?, lendable = ?,
-                     cover_zip_path = ?, cover_media_type = ?
-                 WHERE file_path = ?",
-                mtime,
-                book.title,
-                book.author,
-                book.language,
-                book.description,
-                modified,
-                book.price_usd,
-                lendable,
-                cover_zip,
-                cover_type,
-                path,
-            )
-            .execute(&self.pool)
+        // Whether this file is already known decides id allocation and default-
+        // category seeding. The write itself is an atomic upsert keyed on
+        // file_path, so a stale answer here is harmless (at worst a default
+        // category is re-seeded).
+        let is_new = sqlx::query_scalar!("SELECT id FROM books WHERE file_path = ?", path)
+            .fetch_optional(&self.pool)
             .await
-            {
-                tracing::error!(?err, path, "failed to update book");
-            }
-        } else {
-            let id = self.free_id(&book.id).await;
-            if let Err(err) = self.insert(&id, book, mtime).await {
-                tracing::error!(?err, path, "failed to insert book");
-                return;
-            }
+            .ok()
+            .flatten()
+            .is_none();
+
+        // On conflict the existing id is kept, so this id is only used for a
+        // genuinely new row; free_id keeps it from colliding with another book.
+        let id = self.free_id(&book.id).await;
+        if let Err(err) = self.insert(&id, book, mtime).await {
+            tracing::error!(?err, path, "failed to store book");
+            return;
+        }
+
+        if is_new {
             if let Err(err) = self.seed_category(&id, default_category).await {
                 tracing::error!(?err, path, "failed to seed book category");
             }
@@ -508,7 +489,9 @@ impl CatalogStore {
             .is_some()
     }
 
-    /// Insert a book row with the given id and mtime.
+    /// Insert a book row, or (for a file-backed book whose path is already
+    /// stored) update it in place, keeping its existing id. The conflict target
+    /// is `file_path`; sample books (NULL file_path) never conflict.
     async fn insert(&self, id: &str, book: &Book, mtime: Option<i64>) -> Result<(), sqlx::Error> {
         let file_path = match &book.source {
             BookSource::File { path } => Some(path.to_string_lossy().into_owned()),
@@ -521,7 +504,18 @@ impl CatalogStore {
             "INSERT INTO books (id, file_path, file_mtime, title, author, language,
                  description, modified, price_usd, lendable,
                  cover_zip_path, cover_media_type)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(file_path) DO UPDATE SET
+                 file_mtime = excluded.file_mtime,
+                 title = excluded.title,
+                 author = excluded.author,
+                 language = excluded.language,
+                 description = excluded.description,
+                 modified = excluded.modified,
+                 price_usd = excluded.price_usd,
+                 lendable = excluded.lendable,
+                 cover_zip_path = excluded.cover_zip_path,
+                 cover_media_type = excluded.cover_media_type",
             id,
             file_path,
             mtime,

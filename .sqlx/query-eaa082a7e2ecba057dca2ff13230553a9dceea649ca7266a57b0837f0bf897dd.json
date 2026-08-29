@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO books (id, file_path, file_mtime, title, author, language,\n                 description, modified, price_usd, lendable,\n                 cover_zip_path, cover_media_type)\n             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n             ON CONFLICT(file_path) DO UPDATE SET\n                 file_mtime = excluded.file_mtime,\n                 title = excluded.title,\n                 author = excluded.author,\n                 language = excluded.language,\n                 description = excluded.description,\n                 modified = excluded.modified,\n                 price_usd = excluded.price_usd,\n                 lendable = excluded.lendable,\n                 cover_zip_path = excluded.cover_zip_path,\n                 cover_media_type = excluded.cover_media_type",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 12
+    },
+    "nullable": []
+  },
+  "hash": "eaa082a7e2ecba057dca2ff13230553a9dceea649ca7266a57b0837f0bf897dd"
+}

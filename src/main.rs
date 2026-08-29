@@ -175,13 +175,15 @@ async fn run_server(cli: Cli) -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "opds_axum=debug,tower_http=debug,info".into()),
         )
         .init();
-
+    tracing::debug!("connecting to database");
     // One SQLite database holds both the catalog and the user accounts.
     let pool = db::connect(&cli.db)
         .await
         .with_context(|| format!("opening database {}", cli.db.display()))?;
+    tracing::debug!("creating Catalog");
     let catalog = Arc::new(CatalogStore::new(pool.clone()));
-
+    
+    tracing::debug!("setting up library dir");
     // A library directory is required: the catalog is reconciled against its
     // EPUB files (the built-in sample catalog is test-only scaffolding).
     let library_dir = cli
@@ -189,8 +191,10 @@ async fn run_server(cli: Cli) -> anyhow::Result<()> {
         .filter(|p| !p.as_os_str().is_empty())
         .context("a library directory is required: set OPDS_LIBRARY_DIR or --library-dir")?;
     catalog.remove_sample_books().await;
+    tracing::debug!("reconcile_dir");
     catalog.reconcile_dir(&library_dir).await;
 
+    tracing::debug!("initing auth store");
     // HTTP Basic auth is enforced whenever the user table is non-empty: create
     // an account with `adduser` to lock the catalog, and it's open otherwise.
     let users = AuthStore::new(pool.clone());
@@ -200,7 +204,7 @@ async fn run_server(cli: Cli) -> anyhow::Result<()> {
     } else {
         None
     };
-
+    tracing::debug!("spawning library watcher");
     // Reflect additions/removals in the library directory as they happen.
     if let Err(err) = watch::spawn(library_dir.clone(), catalog.clone()) {
         tracing::warn!(?err, "failed to start the library watcher");
@@ -1371,6 +1375,41 @@ mod tests {
         assert_eq!(store.count().await, 0);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // Re-storing a book at the same file path (e.g. a re-scan after an mtime
+    // change) must update it in place — one row, stable id, no UNIQUE error.
+    #[tokio::test]
+    async fn upsert_file_is_idempotent_on_path() {
+        use catalog::{BookSource, Category};
+        use std::path::PathBuf;
+
+        let store = CatalogStore::new(db::connect_memory().await.unwrap());
+        let category = Category::new("fiction", "Fiction");
+        let make = |title: &str| Book {
+            id: catalog::slugify(title),
+            title: title.to_string(),
+            author: "An Author".to_string(),
+            language: None,
+            description: None,
+            modified: None,
+            price_usd: None,
+            lendable: false,
+            source: BookSource::File {
+                path: PathBuf::from("/library/book.epub"),
+            },
+            cover: None,
+        };
+
+        store.upsert_file(&make("First Title"), Some(1), &category).await;
+        assert_eq!(store.count().await, 1);
+        let id = store.all().await[0].id.clone();
+
+        // Same path, new mtime and title: updates in place, id unchanged.
+        store.upsert_file(&make("Renamed Title"), Some(2), &category).await;
+        assert_eq!(store.count().await, 1);
+        let book = store.get(&id).await.expect("same id");
+        assert_eq!(book.title, "Renamed Title");
     }
 
     #[test]
