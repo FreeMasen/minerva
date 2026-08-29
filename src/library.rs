@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use sqlx::SqlitePool;
 
-use crate::catalog::{self, Book, BookFile, BookSource, Category};
+use crate::catalog::{self, Book, BookFile, BookSource, Category, Format};
 use crate::epub::{CoverRef, EpubMeta};
 
 /// The `books` columns loaded into a [`BookRow`], in a fixed order.
@@ -214,9 +214,15 @@ impl CatalogStore {
         .await
         .map(|rows| {
             rows.into_iter()
-                .map(|r| BookFile {
-                    path: PathBuf::from(r.path),
-                    media_type: r.media_type,
+                .filter_map(|r| match Format::from_media_type(&r.media_type) {
+                    Some(format) => Some(BookFile {
+                        path: PathBuf::from(r.path),
+                        format,
+                    }),
+                    None => {
+                        tracing::warn!(media_type = %r.media_type, "unknown stored media type");
+                        None
+                    }
                 })
                 .collect()
         })
@@ -436,8 +442,11 @@ impl CatalogStore {
             if mtime.is_some() && self.stored_file_mtime(path).await == mtime {
                 continue; // unchanged since last scan
             }
-            match catalog::read_meta(path) {
-                Ok(meta) => self.ingest_file(dir, path, meta, mtime).await,
+            let Some(format) = Format::from_path(path) else {
+                continue; // not a supported book file (book_file_paths already filters)
+            };
+            match format.read_meta(path) {
+                Ok(meta) => self.ingest_file(dir, path, format, meta, mtime).await,
                 Err(err) => {
                     tracing::warn!(?err, path = %path.display(), "skipping unreadable book file");
                 }
@@ -453,8 +462,12 @@ impl CatalogStore {
     /// Read and ingest a single file (used by the watcher for a create/modify).
     pub async fn ingest(&self, dir: &Path, path: &Path) {
         let mtime = file_mtime(path);
-        match catalog::read_meta(path) {
-            Ok(meta) => self.ingest_file(dir, path, meta, mtime).await,
+        let Some(format) = Format::from_path(path) else {
+            tracing::warn!(path = %path.display(), "ignoring unsupported file");
+            return;
+        };
+        match format.read_meta(path) {
+            Ok(meta) => self.ingest_file(dir, path, format, meta, mtime).await,
             Err(err) => {
                 tracing::warn!(?err, path = %path.display(), "dropping unreadable book file");
                 self.delete_by_path(path).await;
@@ -464,10 +477,17 @@ impl CatalogStore {
 
     /// Attach a file to its work (creating the book if new), applying metadata
     /// from the richer format.
-    async fn ingest_file(&self, dir: &Path, path: &Path, meta: EpubMeta, mtime: Option<i64>) {
+    async fn ingest_file(
+        &self,
+        dir: &Path,
+        path: &Path,
+        format: Format,
+        meta: EpubMeta,
+        mtime: Option<i64>,
+    ) {
         let path_str = path.to_string_lossy().into_owned();
-        let media_type = catalog::media_type_for(path).unwrap_or("application/octet-stream");
-        let rank = catalog::format_rank(media_type);
+        let media_type = format.media_type();
+        let rank = format.rank();
 
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("book");
         let title = meta.title.clone().unwrap_or_else(|| stem.to_string());

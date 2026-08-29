@@ -735,10 +735,7 @@ async fn download_format(
     let BookSource::Files(files) = &book.source else {
         return not_found("No such format");
     };
-    let Some(file) = files
-        .iter()
-        .find(|f| catalog::format_ext(&f.media_type) == format)
-    else {
+    let Some(file) = files.iter().find(|f| f.format.ext() == format) else {
         return not_found("No such format");
     };
 
@@ -748,9 +745,9 @@ async fn download_format(
         .and_then(|s| s.to_str())
         .unwrap_or("book")
         .to_string();
-    let media_type = file.media_type.clone();
+    let media_type = file.format.media_type();
     match tokio::fs::read(&file.path).await {
-        Ok(bytes) => file_response(&filename, &media_type, bytes),
+        Ok(bytes) => file_response(&filename, media_type, bytes),
         Err(err) => {
             tracing::error!(?err, path = %file.path.display(), "failed to read book file");
             not_found("Publication file is unavailable")
@@ -846,7 +843,7 @@ async fn serve_cover(state: Arc<AppState>, id: String, thumbnail: bool) -> Respo
     let epub_path = match (&book.cover, &book.source) {
         (Some(_), BookSource::Files(files)) => files
             .iter()
-            .find(|f| f.media_type == "application/epub+zip")
+            .find(|f| f.format == catalog::Format::Epub)
             .map(|f| f.path.clone()),
         _ => None,
     };
@@ -1487,12 +1484,12 @@ mod tests {
         assert_eq!(store.count().await, 1);
         let stored = store.all().await.remove(0);
         let id = stored.id.clone();
-        let media_types: Vec<String> = match &stored.source {
-            BookSource::Files(files) => files.iter().map(|f| f.media_type.clone()).collect(),
+        let media_types: Vec<&str> = match &stored.source {
+            BookSource::Files(files) => files.iter().map(|f| f.format.media_type()).collect(),
             _ => panic!("expected file-backed book"),
         };
-        assert!(media_types.contains(&"application/epub+zip".to_string()));
-        assert!(media_types.contains(&"application/x-xtc".to_string()));
+        assert!(media_types.contains(&"application/epub+zip"));
+        assert!(media_types.contains(&"application/x-xtc"));
 
         let app = app(Arc::new(AppState {
             base_url: BASE.to_string(),

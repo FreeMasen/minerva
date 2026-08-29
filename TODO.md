@@ -14,14 +14,15 @@ wire wants `price.value` as a JSON *number*. Prices here are near-vestigial
 value as `cents as f64 / 100.0`. (If we ever want real multi-currency, revisit
 doubloon and persist minor units.)
 
-### 1. `AvailabilityState` enum — DONE (code), not committed
+### 1. `AvailabilityState` enum — DONE + committed
 - `src/model.rs`: added `enum AvailabilityState { Available, Unavailable,
   Reserved, Ready }` (`#[serde(rename_all = "lowercase")]`); `Availability.state`
   is now that enum instead of `Cow<'static, str>`.
 - `src/catalog.rs`: `state: AvailabilityState::Available`.
 - Built + `lendable` test green.
 
-### 2. `Format` enum — IN PROGRESS
+### 2. `Format` enum — DONE + committed
+(All the sub-steps below are complete; 33 tests pass, offline build clean.)
 Goal: one `enum Format { Epub, Xtc, Xtch }` replacing the 4 string helpers and
 `BookFile.media_type: String` -> `BookFile.format: Format`. DB `book_files.media_type`
 column is UNCHANGED (still stores the media-type string); `Format::from_media_type`

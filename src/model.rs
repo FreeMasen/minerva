@@ -283,11 +283,20 @@ pub struct LinkProperties {
     pub copies: Option<Copies>,
 }
 
+/// The lending state of a resource.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AvailabilityState {
+    Available,
+    Unavailable,
+    Reserved,
+    Ready,
+}
+
 /// Lending availability of a resource.
 #[derive(Debug, Clone, Serialize)]
 pub struct Availability {
-    /// One of `available`, `unavailable`, `reserved`, `ready`.
-    pub state: Cow<'static, str>,
+    pub state: AvailabilityState,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,

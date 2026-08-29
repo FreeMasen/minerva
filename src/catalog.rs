@@ -48,7 +48,74 @@ pub enum BookSource {
 #[derive(Debug, Clone)]
 pub struct BookFile {
     pub path: PathBuf,
-    pub media_type: String,
+    pub format: Format,
+}
+
+/// A supported book file format. Centralizes everything we need to know about a
+/// format: its extension, media type, metadata richness, and how to read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Epub,
+    Xtc,
+    Xtch,
+}
+
+impl Format {
+    /// The format of `path`, by extension, or `None` if it isn't a supported
+    /// book file.
+    pub(crate) fn from_path(path: &Path) -> Option<Format> {
+        match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+            "epub" => Some(Format::Epub),
+            "xtc" => Some(Format::Xtc),
+            "xtch" => Some(Format::Xtch),
+            _ => None,
+        }
+    }
+
+    /// The format for a stored media-type string, or `None` if unrecognized.
+    pub(crate) fn from_media_type(media_type: &str) -> Option<Format> {
+        match media_type {
+            "application/epub+zip" => Some(Format::Epub),
+            "application/x-xtc" => Some(Format::Xtc),
+            "application/x-xtch" => Some(Format::Xtch),
+            _ => None,
+        }
+    }
+
+    /// The media type, used both on the wire and as a download `Content-Type`.
+    pub(crate) fn media_type(self) -> &'static str {
+        match self {
+            Format::Epub => "application/epub+zip",
+            Format::Xtc => "application/x-xtc",
+            Format::Xtch => "application/x-xtch",
+        }
+    }
+
+    /// The URL path segment (and file extension) used to request this format.
+    pub(crate) fn ext(self) -> &'static str {
+        match self {
+            Format::Epub => "epub",
+            Format::Xtc => "xtc",
+            Format::Xtch => "xtch",
+        }
+    }
+
+    /// Metadata richness: the highest-ranked format present supplies a work's
+    /// title/author/cover. EPUB carries the fullest metadata.
+    pub(crate) fn rank(self) -> i64 {
+        match self {
+            Format::Epub => 2,
+            Format::Xtc | Format::Xtch => 1,
+        }
+    }
+
+    /// Read metadata from a file of this format.
+    pub(crate) fn read_meta(self, path: &Path) -> std::io::Result<epub::EpubMeta> {
+        match self {
+            Format::Epub => epub::read_meta(path),
+            Format::Xtc | Format::Xtch => crate::xtc::read_meta(path),
+        }
+    }
 }
 
 /// A category a book can belong to. Categories are arbitrary and created on
@@ -68,52 +135,9 @@ impl Category {
     }
 }
 
-/// The media type for a supported book file, by extension (`None` if not a
-/// recognized book format).
-pub(crate) fn media_type_for(path: &Path) -> Option<&'static str> {
-    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-    match ext.as_str() {
-        "epub" => Some("application/epub+zip"),
-        "xtc" => Some("application/x-xtc"),
-        "xtch" => Some("application/x-xtch"),
-        _ => None,
-    }
-}
-
 /// Whether a path names a supported book file.
 pub(crate) fn is_book_file(path: &Path) -> bool {
-    media_type_for(path).is_some()
-}
-
-/// A format's metadata richness: the highest-ranked format present supplies a
-/// work's title/author/cover. EPUB carries the fullest metadata.
-pub(crate) fn format_rank(media_type: &str) -> i64 {
-    match media_type {
-        "application/epub+zip" => 2,
-        _ => 1,
-    }
-}
-
-/// The URL path segment (and file extension) used to request a given format.
-pub(crate) fn format_ext(media_type: &str) -> &'static str {
-    match media_type {
-        "application/epub+zip" => "epub",
-        "application/x-xtch" => "xtch",
-        "application/x-xtc" => "xtc",
-        _ => "bin",
-    }
-}
-
-/// Read metadata from a supported book file, dispatching on its format.
-pub(crate) fn read_meta(path: &Path) -> std::io::Result<epub::EpubMeta> {
-    match media_type_for(path) {
-        Some("application/epub+zip") => epub::read_meta(path),
-        Some("application/x-xtc" | "application/x-xtch") => crate::xtc::read_meta(path),
-        _ => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "unsupported book format",
-        )),
-    }
+    Format::from_path(path).is_some()
 }
 
 /// A stable grouping key for a logical work (its title and author, slugified).
@@ -254,7 +278,7 @@ impl Book {
                     .with_properties(LinkProperties {
                         indirect_acquisition: epub_indirect(),
                         availability: Some(Availability {
-                            state: "available".into(),
+                            state: AvailabilityState::Available,
                             since: None,
                             until: None,
                         }),
@@ -297,10 +321,10 @@ impl Book {
                             Link::new(format!(
                                 "{base}/opds/download/{}/{}",
                                 self.id,
-                                format_ext(&file.media_type)
+                                file.format.ext()
                             ))
                             .with_rel("http://opds-spec.org/acquisition/open-access")
-                            .with_type(file.media_type.clone()),
+                            .with_type(file.format.media_type()),
                         );
                     }
                 }
