@@ -39,8 +39,8 @@ request rather than held in memory.
 
 `OPDS_LIBRARY_DIR` is required. On startup the server reconciles the store
 against it — scanning book files (`*.epub`, `*.xtc`, `*.xtch`) recursively and
-recording each file's metadata (title, author, language, description, subjects)
-and cover. A book is a logical work that can have **several format files**:
+recording each file's metadata (title, author, language, description, subjects,
+series) and cover. A book is a logical work that can have **several format files**:
 files sharing a title + author group into one publication with one download link
 per format, and the richest format (EPUB over XTC) supplies the shared metadata.
 Unchanged files (matching a stored modification time) are skipped on restart, so
@@ -97,6 +97,8 @@ and are not compiled into the server.)
 - Cover `images` (full-size + thumbnail), served from the EPUB's embedded cover
   (thumbnails are downscaled to fit 160x240 and re-encoded as JPEG) or as a
   generated SVG placeholder.
+- Series metadata (`belongsTo.series` with `name`/`position`), read from EPUB
+  Calibre or EPUB3 collection metadata and editable in the admin UI.
 - A templated `search` link (`search{?query,author,title}`) and a search
   endpoint supporting a general query plus per-field author/title filters.
 - Pagination on the acquisition feed: `numberOfItems`/`itemsPerPage`/`currentPage`

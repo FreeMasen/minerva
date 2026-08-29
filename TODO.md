@@ -19,11 +19,14 @@ Only ID newtypes (refactor #4 below) remains.
 
 # Plan / deferred work
 
-## IN PROGRESS — "stringly-typed -> richer types" refactor (RESUME HERE)
+## DONE — "stringly-typed -> richer types" refactor
 
-Converting stringly-typed values into domain types. Four pieces were approved
-(all of them). DB migrations are fine — nothing is deployed. Last clean commit
-is `d95f04a` (the Cow refactor); everything below is uncommitted work on top.
+All four approved pieces are committed (AvailabilityState enum, Format enum,
+UsdCents + Acquisition enum, BookId/CategorySlug newtypes). Details below.
+
+Still open: "lots of my books are missing authors" ([~] above) — added the
+`file-as` fallback, but a sample EPUB from the real library is needed to confirm
+the actual cause (or whether it's XTC files with no embedded author).
 
 Money decision: use a `UsdCents(u32)` newtype, NOT the `doubloon` crate.
 doubloon is built on `rust_decimal` (no clean SQLite mapping — SQLite has no
@@ -95,7 +98,10 @@ Work:
 - Tests: `paid_publication_has_indirect_acquisition`,
   `lendable_publication_has_borrow_with_availability` reference price/lendable.
 
-### 4. ID newtypes (`BookId`, `CategorySlug`) — NOT STARTED
+### 4. ID newtypes (`BookId`, `CategorySlug`) — DONE + committed
+(Transparent String newtypes on `Book.id`/`Category.slug`; persistence stays
+`&str` via `as_str()`, so no sqlx `Type`/`Encode` impls were needed. 36 tests
+pass.) Original plan notes below.
 Wrap the slug strings for type safety. NOT uuid/int — the ids are human-readable
 URL slugs (`/opds/publications/moby-dick`) derived from titles; keep that.
 - `struct BookId(String)` / `struct CategorySlug(String)` (Deserialize for axum
