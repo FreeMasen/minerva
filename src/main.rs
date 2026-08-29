@@ -53,7 +53,7 @@ use crate::model::*;
 
 /// An OPDS 2.0 catalog server built on Axum.
 #[derive(Parser)]
-#[command(name = "opds-axum", version, about)]
+#[command(name = "minerva", version, about)]
 struct Cli {
     /// Externally-visible base URL used to build absolute hrefs.
     #[arg(long, short = 'u', env = "OPDS_BASE_URL", default_value = "http://localhost:3000")]
@@ -173,7 +173,7 @@ async fn run_server(cli: Cli) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "opds_axum=debug,tower_http=debug,info".into()),
+                .unwrap_or_else(|_| "minerva=debug,tower_http=debug,info".into()),
         )
         .init();
 

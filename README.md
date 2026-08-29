@@ -1,4 +1,4 @@
-# opds-axum
+# minerva
 
 An [OPDS 2.0](https://specs.opds.io/opds-2.0.html) catalog server built with
 [Axum](https://github.com/tokio-rs/axum).
@@ -160,10 +160,10 @@ into `OPDS_LIBRARY_DIR` (required for uploads) and reconciled immediately.
 
 ## Deployment
 
-A hardened systemd unit is provided at [`opds-axum.service`](opds-axum.service);
+A hardened systemd unit is provided at [`minerva.service`](minerva.service);
 its header comments cover installing the binary, creating the service user, and
-configuring it (env vars or `/etc/opds-axum/opds-axum.env`). The catalog
-database lives in `/var/lib/opds-axum`.
+configuring it (env vars or `/etc/minerva/minerva.env`). The catalog
+database lives in `/var/lib/minerva`.
 
 ## Layout
 

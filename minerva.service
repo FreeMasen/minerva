@@ -1,43 +1,43 @@
-# systemd service for the opds-axum catalog server.
+# systemd service for the minerva OPDS catalog server.
 #
 # Install:
 #   cargo build --release
-#   sudo install -Dm755 target/release/opds-axum /usr/local/bin/opds-axum
-#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin opds
-#   sudo install -Dm644 opds-axum.service /etc/systemd/system/opds-axum.service
-#   # optionally drop config in /etc/opds-axum/opds-axum.env (see EnvironmentFile below)
+#   sudo install -Dm755 target/release/minerva /usr/local/bin/minerva
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin minerva
+#   sudo install -Dm644 minerva.service /etc/systemd/system/minerva.service
+#   # optionally drop config in /etc/minerva/minerva.env (see EnvironmentFile below)
 #   sudo systemctl daemon-reload
-#   sudo systemctl enable --now opds-axum
+#   sudo systemctl enable --now minerva
 #
-# Logs: journalctl -u opds-axum -f   (level via RUST_LOG below)
+# Logs: journalctl -u minerva -f   (level via RUST_LOG below)
 
 [Unit]
-Description=opds-axum OPDS 2.0 catalog server
+Description=minerva OPDS 2.0 catalog server
 Documentation=https://specs.opds.io/opds-2.0.html
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=exec
-ExecStart=/usr/local/bin/opds-axum
+ExecStart=/usr/local/bin/minerva
 
 # --- Configuration ---------------------------------------------------------
 # OPDS_LIBRARY_DIR (a directory of EPUB files) is required — set it here or in
 # the env file. The catalog + user database lives in the state directory below.
 Environment=OPDS_LIBRARY_DIR=/srv/books
-Environment=OPDS_DB=/var/lib/opds-axum/opds.db
+Environment=OPDS_DB=/var/lib/minerva/opds.db
 Environment=OPDS_BASE_URL=http://localhost:3000
-Environment=RUST_LOG=opds_axum=info,tower_http=info,warn
-EnvironmentFile=-/etc/opds-axum/opds-axum.env
+Environment=RUST_LOG=minerva=info,tower_http=info,warn
+EnvironmentFile=-/etc/minerva/minerva.env
 
 # --- Identity & state ------------------------------------------------------
 # A dedicated unprivileged user. StateDirectory creates and owns
-# /var/lib/opds-axum (0700) for the SQLite database (and its -wal/-shm files).
-User=opds
-Group=opds
-StateDirectory=opds-axum
+# /var/lib/minerva (0700) for the SQLite database (and its -wal/-shm files).
+User=minerva
+Group=minerva
+StateDirectory=minerva
 StateDirectoryMode=0700
-WorkingDirectory=/var/lib/opds-axum
+WorkingDirectory=/var/lib/minerva
 
 Restart=on-failure
 RestartSec=5
@@ -53,7 +53,7 @@ ProtectSystem=strict
 ProtectHome=read-only
 # The state dir (database) is writable; add the library dir too if you want
 # admin uploads to work (it must match OPDS_LIBRARY_DIR).
-ReadWritePaths=/var/lib/opds-axum /srv/books
+ReadWritePaths=/var/lib/minerva /srv/books
 PrivateTmp=true
 PrivateDevices=true
 ProtectClock=true
