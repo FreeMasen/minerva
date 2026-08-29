@@ -77,6 +77,25 @@ fn opf_path(container_xml: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// An attribute's value by local name, ignoring its XML namespace (so both
+/// `file-as` and `opf:file-as` match).
+fn attr_local<'a>(n: roxmltree::Node<'a, '_>, local: &str) -> Option<&'a str> {
+    n.attributes()
+        .find(|a| a.name() == local)
+        .map(|a| a.value())
+}
+
+/// De-invert a "Last, First" library-sort name into "First Last". Names without
+/// a single inverting comma are returned trimmed and unchanged.
+fn uninvert_name(name: &str) -> String {
+    match name.split_once(',') {
+        Some((last, first)) if !first.trim().is_empty() => {
+            format!("{} {}", first.trim(), last.trim())
+        }
+        _ => name.trim().to_string(),
+    }
+}
+
 fn parse_opf(opf: &str, opf_path: &str) -> Result<EpubMeta, String> {
     let doc = roxmltree::Document::parse(opf).map_err(|e| e.to_string())?;
     let mut meta = EpubMeta::default();
@@ -95,7 +114,11 @@ fn parse_opf(opf: &str, opf_path: &str) -> Result<EpubMeta, String> {
     for n in doc.descendants() {
         match n.tag_name().name() {
             "title" if meta.title.is_none() => meta.title = text(n),
-            "creator" if meta.author.is_none() => meta.author = text(n),
+            "creator" if meta.author.is_none() => {
+                // Prefer the element text; fall back to the `file-as` attribute
+                // (some EPUBs leave the element empty), de-inverting "Last, First".
+                meta.author = text(n).or_else(|| attr_local(n, "file-as").map(uninvert_name));
+            }
             "language" if meta.language.is_none() => meta.language = text(n),
             "description" if meta.description.is_none() => meta.description = text(n),
             "identifier" if meta.identifier.is_none() => meta.identifier = text(n),
