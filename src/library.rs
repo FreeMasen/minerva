@@ -14,12 +14,12 @@ use std::path::{Path, PathBuf};
 
 use sqlx::SqlitePool;
 
-use crate::catalog::{self, Book, BookFile, BookSource, Category, Format};
+use crate::catalog::{self, Acquisition, Book, BookFile, BookSource, Category, Format, UsdCents};
 use crate::epub::{CoverRef, EpubMeta};
 
 /// The `books` columns loaded into a [`BookRow`], in a fixed order.
 const BOOK_COLUMNS: &str = "id, title, author, language, description, modified, \
-     price_usd, lendable, cover_zip_path, cover_media_type";
+     price_cents, lendable, cover_zip_path, cover_media_type";
 
 /// A flat row from the `books` table; combined with its files to make a [`Book`].
 #[derive(sqlx::FromRow)]
@@ -30,7 +30,7 @@ struct BookRow {
     language: Option<String>,
     description: Option<String>,
     modified: Option<String>,
-    price_usd: Option<f64>,
+    price_cents: Option<i64>,
     lendable: i64,
     cover_zip_path: Option<String>,
     cover_media_type: Option<String>,
@@ -50,6 +50,15 @@ impl BookRow {
             }),
             _ => None,
         };
+        // Exactly one acquisition mode applies; a borrow takes precedence over a
+        // stray price, and no price means a free download.
+        let acquisition = if self.lendable != 0 {
+            Acquisition::Borrow
+        } else if let Some(cents) = self.price_cents {
+            Acquisition::Buy(UsdCents(cents.clamp(0, i64::from(u32::MAX)) as u32))
+        } else {
+            Acquisition::OpenAccess
+        };
         Book {
             id: self.id,
             title: self.title,
@@ -57,8 +66,7 @@ impl BookRow {
             language: self.language,
             description: self.description,
             modified: self.modified.as_deref().and_then(catalog::parse_timestamp),
-            price_usd: self.price_usd,
-            lendable: self.lendable != 0,
+            acquisition,
             source,
             cover,
         }
@@ -91,7 +99,7 @@ impl CatalogStore {
         let row = sqlx::query_as!(
             BookRow,
             "SELECT id, title, author, language, description, modified,
-                    price_usd, lendable, cover_zip_path, cover_media_type
+                    price_cents, lendable, cover_zip_path, cover_media_type
              FROM books WHERE id = ?",
             id
         )
@@ -110,7 +118,7 @@ impl CatalogStore {
         let rows = sqlx::query_as!(
             BookRow,
             "SELECT id, title, author, language, description, modified,
-                    price_usd, lendable, cover_zip_path, cover_media_type
+                    price_cents, lendable, cover_zip_path, cover_media_type
              FROM books ORDER BY title COLLATE NOCASE LIMIT ? OFFSET ?",
             limit,
             offset
@@ -127,7 +135,7 @@ impl CatalogStore {
         let rows = sqlx::query_as!(
             BookRow,
             "SELECT id, title, author, language, description, modified,
-                    price_usd, lendable, cover_zip_path, cover_media_type
+                    price_cents, lendable, cover_zip_path, cover_media_type
              FROM books ORDER BY modified DESC LIMIT ?",
             limit
         )
@@ -143,7 +151,7 @@ impl CatalogStore {
         let rows = sqlx::query_as!(
             BookRow,
             "SELECT id, title, author, language, description, modified,
-                    price_usd, lendable, cover_zip_path, cover_media_type
+                    price_cents, lendable, cover_zip_path, cover_media_type
              FROM books ORDER BY title COLLATE NOCASE"
         )
         .fetch_all(&self.pool)
@@ -265,7 +273,7 @@ impl CatalogStore {
         let rows = sqlx::query_as!(
             BookRow,
             r#"SELECT b.id AS "id!", b.title AS "title!", b.author AS "author!",
-                      b.language, b.description, b.modified, b.price_usd,
+                      b.language, b.description, b.modified, b.price_cents,
                       b.lendable AS "lendable!", b.cover_zip_path, b.cover_media_type
                FROM books b
                JOIN book_categories bc ON bc.book_id = b.id
@@ -371,7 +379,7 @@ impl CatalogStore {
         let rows = sqlx::query_as!(
             BookRow,
             "SELECT id, title, author, language, description, modified,
-                    price_usd, lendable, cover_zip_path, cover_media_type
+                    price_cents, lendable, cover_zip_path, cover_media_type
              FROM books WHERE author = ? ORDER BY title COLLATE NOCASE",
             author
         )
@@ -700,11 +708,15 @@ impl CatalogStore {
         }
         for (book, category) in catalog::sample_books() {
             let modified = book.modified.map(|t| t.to_string());
-            let lendable = book.lendable as i64;
+            let (price_cents, lendable): (Option<i64>, i64) = match book.acquisition {
+                Acquisition::OpenAccess => (None, 0),
+                Acquisition::Buy(cents) => (Some(i64::from(cents.0)), 0),
+                Acquisition::Borrow => (None, 1),
+            };
             let work = catalog::work_key(&book.title, &book.author);
             if let Err(err) = sqlx::query!(
                 "INSERT INTO books (id, work_key, title, author, language, description,
-                     modified, price_usd, lendable, meta_rank)
+                     modified, price_cents, lendable, meta_rank)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
                 book.id,
                 work,
@@ -713,7 +725,7 @@ impl CatalogStore {
                 book.language,
                 book.description,
                 modified,
-                book.price_usd,
+                price_cents,
                 lendable,
             )
             .execute(&self.pool)

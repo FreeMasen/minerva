@@ -23,11 +23,8 @@ pub struct Book {
     pub language: Option<String>,
     pub description: Option<String>,
     pub modified: Option<jiff::Timestamp>,
-    /// Price in USD for a paid title, or `None` for a free/open-access download.
-    pub price_usd: Option<f64>,
-    /// Whether the title is borrowed (library lending) rather than downloaded
-    /// or bought outright.
-    pub lendable: bool,
+    /// How the title may be acquired (free download, purchase, or borrow).
+    pub acquisition: Acquisition,
     /// Where the book's bytes come from.
     pub source: BookSource,
     /// The embedded cover image, when one was found. Absent covers are served as
@@ -239,11 +236,36 @@ pub(crate) fn slugify(input: &str) -> String {
     out
 }
 
+/// A monetary amount in US-dollar cents (minor units), stored and compared as
+/// an exact integer instead of a lossy `f64`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsdCents(pub u32);
+
+impl UsdCents {
+    /// The amount in dollars, for the wire: OPDS `price.value` is a JSON number.
+    pub fn as_dollars(self) -> f64 {
+        f64::from(self.0) / 100.0
+    }
+}
+
+/// How a title may be acquired. Exactly one mode applies, so this replaces the
+/// old `(price_usd, lendable)` pair and its impossible "priced *and* lendable"
+/// combination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Acquisition {
+    /// A free, open-access download.
+    OpenAccess,
+    /// For sale at the given price.
+    Buy(UsdCents),
+    /// Available to borrow (library lending).
+    Borrow,
+}
+
 impl Book {
     /// A freely downloadable title: neither for sale nor lent.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_open_access(&self) -> bool {
-        self.price_usd.is_none() && !self.lendable
+        matches!(self.acquisition, Acquisition::OpenAccess)
     }
 
     /// Build the OPDS `Publication` (as embedded in a feed) for this book.
@@ -270,62 +292,66 @@ impl Book {
             }]
         };
         let mut links = vec![self_link];
-        if self.lendable {
-            links.push(
-                Link::new(format!("{base}/opds/borrow/{}", self.id))
-                    .with_rel("http://opds-spec.org/acquisition/borrow")
-                    .with_type("text/html")
-                    .with_properties(LinkProperties {
-                        indirect_acquisition: epub_indirect(),
-                        availability: Some(Availability {
-                            state: AvailabilityState::Available,
-                            since: None,
-                            until: None,
+        match self.acquisition {
+            Acquisition::Borrow => {
+                links.push(
+                    Link::new(format!("{base}/opds/borrow/{}", self.id))
+                        .with_rel("http://opds-spec.org/acquisition/borrow")
+                        .with_type("text/html")
+                        .with_properties(LinkProperties {
+                            indirect_acquisition: epub_indirect(),
+                            availability: Some(Availability {
+                                state: AvailabilityState::Available,
+                                since: None,
+                                until: None,
+                            }),
+                            copies: Some(Copies {
+                                total: Some(3),
+                                available: Some(2),
+                            }),
+                            holds: Some(Holds {
+                                total: Some(1),
+                                position: None,
+                            }),
+                            ..Default::default()
                         }),
-                        copies: Some(Copies {
-                            total: Some(3),
-                            available: Some(2),
+                );
+            }
+            Acquisition::Buy(price) => {
+                links.push(
+                    Link::new(format!("{base}/opds/buy/{}", self.id))
+                        .with_rel("http://opds-spec.org/acquisition/buy")
+                        .with_type("text/html")
+                        .with_properties(LinkProperties {
+                            price: Some(Price {
+                                currency: "USD".into(),
+                                value: price.as_dollars(),
+                            }),
+                            indirect_acquisition: epub_indirect(),
+                            ..Default::default()
                         }),
-                        holds: Some(Holds {
-                            total: Some(1),
-                            position: None,
-                        }),
-                        ..Default::default()
-                    }),
-            );
-        } else if let Some(price) = self.price_usd {
-            links.push(
-                Link::new(format!("{base}/opds/buy/{}", self.id))
-                    .with_rel("http://opds-spec.org/acquisition/buy")
-                    .with_type("text/html")
-                    .with_properties(LinkProperties {
-                        price: Some(Price {
-                            currency: "USD".into(),
-                            value: price,
-                        }),
-                        indirect_acquisition: epub_indirect(),
-                        ..Default::default()
-                    }),
-            );
-        } else {
-            // Open access: one download link per available format.
-            match &self.source {
-                BookSource::Sample => links.push(
-                    Link::new(format!("{base}/opds/download/{}.epub", self.id))
-                        .with_rel("http://opds-spec.org/acquisition/open-access")
-                        .with_type("application/epub+zip"),
-                ),
-                BookSource::Files(files) => {
-                    for file in files {
-                        links.push(
-                            Link::new(format!(
-                                "{base}/opds/download/{}/{}",
-                                self.id,
-                                file.format.ext()
-                            ))
+                );
+            }
+            Acquisition::OpenAccess => {
+                // One download link per available format.
+                match &self.source {
+                    BookSource::Sample => links.push(
+                        Link::new(format!("{base}/opds/download/{}.epub", self.id))
                             .with_rel("http://opds-spec.org/acquisition/open-access")
-                            .with_type(file.format.media_type()),
-                        );
+                            .with_type("application/epub+zip"),
+                    ),
+                    BookSource::Files(files) => {
+                        for file in files {
+                            links.push(
+                                Link::new(format!(
+                                    "{base}/opds/download/{}/{}",
+                                    self.id,
+                                    file.format.ext()
+                                ))
+                                .with_rel("http://opds-spec.org/acquisition/open-access")
+                                .with_type(file.format.media_type()),
+                            );
+                        }
                     }
                 }
             }
@@ -366,8 +392,7 @@ pub(crate) fn sample_books() -> Vec<(Book, Category)> {
                 description: &str,
                 modified: &str,
                 category: Category,
-                price_usd: Option<f64>,
-                lendable: bool|
+                acquisition: Acquisition|
      -> (Book, Category) {
         let book = Book {
             id: id.to_string(),
@@ -376,8 +401,7 @@ pub(crate) fn sample_books() -> Vec<(Book, Category)> {
             language: Some("en".to_string()),
             description: Some(description.to_string()),
             modified: parse_timestamp(modified),
-            price_usd,
-            lendable,
+            acquisition,
             source: BookSource::Sample,
             cover: None,
         };
@@ -395,8 +419,7 @@ pub(crate) fn sample_books() -> Vec<(Book, Category)> {
             "The saga of Captain Ahab and his monomaniacal pursuit of the white whale.",
             "2015-09-29T17:00:00Z",
             fiction(),
-            None,
-            false,
+            Acquisition::OpenAccess,
         ),
         book(
             "pride-and-prejudice",
@@ -405,8 +428,7 @@ pub(crate) fn sample_books() -> Vec<(Book, Category)> {
             "Elizabeth Bennet navigates manners, upbringing, and marriage.",
             "2016-01-12T09:30:00Z",
             fiction(),
-            Some(4.99),
-            false,
+            Acquisition::Buy(UsdCents(499)),
         ),
         book(
             "frankenstein",
@@ -415,8 +437,7 @@ pub(crate) fn sample_books() -> Vec<(Book, Category)> {
             "A scientist creates a sapient creature and reaps the consequences.",
             "2018-07-03T12:00:00Z",
             fiction(),
-            None,
-            false,
+            Acquisition::OpenAccess,
         ),
         book(
             "on-the-origin-of-species",
@@ -425,8 +446,7 @@ pub(crate) fn sample_books() -> Vec<(Book, Category)> {
             "The foundational work of evolutionary biology.",
             "2017-11-24T00:00:00Z",
             nonfiction(),
-            Some(2.99),
-            false,
+            Acquisition::Buy(UsdCents(299)),
         ),
         book(
             "the-art-of-war",
@@ -435,8 +455,7 @@ pub(crate) fn sample_books() -> Vec<(Book, Category)> {
             "An ancient Chinese treatise on military strategy.",
             "2019-02-14T08:00:00Z",
             nonfiction(),
-            None,
-            true, // borrowable — demonstrates library lending
+            Acquisition::Borrow, // demonstrates library lending
         ),
     ]
 }

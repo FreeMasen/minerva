@@ -50,7 +50,10 @@ parses it on read, `format.media_type()` writes it. No migration, no `.sqlx` cha
     asserts become `.contains(&"application/epub+zip")` etc.
 - THEN: `cargo build` + `cargo test` (DATABASE_URL=sqlite:dev.db), commit.
 
-### 3. Money (`UsdCents`) + `Acquisition` enum — NOT STARTED
+### 3. Money (`UsdCents`) + `Acquisition` enum — DONE + committed
+(`UsdCents(u32)` + `Acquisition { OpenAccess, Buy(UsdCents), Borrow }` on `Book`;
+migration `0004_price_cents.sql` drops `price_usd REAL` for `price_cents INTEGER`;
+`.sqlx` regenerated; 33 tests pass. Original plan notes kept below for reference.)
 Replace `Book.price_usd: Option<f64>` + `Book.lendable: bool` (an implicit
 tri-state with the impossible `lendable && priced` combo) with:
 - `struct UsdCents(u32)` (probably in `catalog.rs` or a small `money.rs`).

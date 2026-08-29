@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, title, author, language, description, modified,\n                    price_usd, lendable, cover_zip_path, cover_media_type\n             FROM books ORDER BY title COLLATE NOCASE",
+  "query": "SELECT id, title, author, language, description, modified,\n                    price_cents, lendable, cover_zip_path, cover_media_type\n             FROM books ORDER BY title COLLATE NOCASE LIMIT ? OFFSET ?",
   "describe": {
     "columns": [
       {
@@ -34,9 +34,9 @@
         "type_info": "Text"
       },
       {
-        "name": "price_usd",
+        "name": "price_cents",
         "ordinal": 6,
-        "type_info": "Float"
+        "type_info": "Integer"
       },
       {
         "name": "lendable",
@@ -55,7 +55,7 @@
       }
     ],
     "parameters": {
-      "Right": 0
+      "Right": 2
     },
     "nullable": [
       false,
@@ -70,5 +70,5 @@
       true
     ]
   },
-  "hash": "727a495bcb907ee08a5b01cabec4c9f1b2fbfb097c195d9cb917dd1fbbfd6de2"
+  "hash": "df348f3d7eda14c3bffdae738ff030222239c4898811e7068d89b3ce2a1f297c"
 }

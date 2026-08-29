@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT b.id AS \"id!\", b.title AS \"title!\", b.author AS \"author!\",\n                      b.language, b.description, b.modified, b.price_usd,\n                      b.lendable AS \"lendable!\", b.cover_zip_path, b.cover_media_type\n               FROM books b\n               JOIN book_categories bc ON bc.book_id = b.id\n               WHERE bc.category_slug = ?\n               ORDER BY b.title COLLATE NOCASE",
+  "query": "SELECT b.id AS \"id!\", b.title AS \"title!\", b.author AS \"author!\",\n                      b.language, b.description, b.modified, b.price_cents,\n                      b.lendable AS \"lendable!\", b.cover_zip_path, b.cover_media_type\n               FROM books b\n               JOIN book_categories bc ON bc.book_id = b.id\n               WHERE bc.category_slug = ?\n               ORDER BY b.title COLLATE NOCASE",
   "describe": {
     "columns": [
       {
@@ -34,9 +34,9 @@
         "type_info": "Text"
       },
       {
-        "name": "price_usd",
+        "name": "price_cents",
         "ordinal": 6,
-        "type_info": "Float"
+        "type_info": "Integer"
       },
       {
         "name": "lendable!",
@@ -70,5 +70,5 @@
       true
     ]
   },
-  "hash": "4e46cdc4029931d3ad0e706558a67a1cf06c3c6d4f6fa9eb8cd5e2fe3c7192ab"
+  "hash": "bc8868f39affe4236976a82243f15d5652a1396923157cf3c7aaabcc44dd2ace"
 }

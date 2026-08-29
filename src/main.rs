@@ -797,10 +797,10 @@ async fn buy(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Resp
         return not_found("No such publication");
     };
 
-    let price = book
-        .price_usd
-        .map(|p| format!("${p:.2} USD"))
-        .unwrap_or_else(|| "an unlisted price".to_string());
+    let price = match book.acquisition {
+        catalog::Acquisition::Buy(cents) => format!("${:.2} USD", cents.as_dollars()),
+        _ => "an unlisted price".to_string(),
+    };
     let message = format!(
         "Purchasing is not available on this server. \"{}\" is listed at {price}.",
         book.title,

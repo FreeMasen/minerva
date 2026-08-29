@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, title, author, language, description, modified,\n                    price_usd, lendable, cover_zip_path, cover_media_type\n             FROM books WHERE id = ?",
+  "query": "SELECT id, title, author, language, description, modified,\n                    price_cents, lendable, cover_zip_path, cover_media_type\n             FROM books WHERE id = ?",
   "describe": {
     "columns": [
       {
@@ -34,9 +34,9 @@
         "type_info": "Text"
       },
       {
-        "name": "price_usd",
+        "name": "price_cents",
         "ordinal": 6,
-        "type_info": "Float"
+        "type_info": "Integer"
       },
       {
         "name": "lendable",
@@ -70,5 +70,5 @@
       true
     ]
   },
-  "hash": "49c3149c27eb468ef91e5affc0cb8a44a6e705dd08620290e7fe6e2687d6370d"
+  "hash": "52db62c429d66c2cb0a83633cde58d2b5382c89ea3cf32a84da584a62651a09d"
 }
