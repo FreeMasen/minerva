@@ -1,9 +1,18 @@
 # Plan / deferred work
 
-- make a pass at reducing allocation, especially for duplicated string allocations
-  (assessed: no significant duplicated-allocation hotspot for this workload;
-  revisit if a specific path is profiled)
 ## Done (recent batch)
+
+- **Fewer allocations building the wire model** — the constant-bearing link/
+  metadata fields (`Link::rel`/`type`/`title`, `Metadata::@type`, `Price`,
+  `Availability::state`, `IndirectAcquisition`, auth flow type) are now
+  `Cow<'static, str>`. String *constants* (rels, media types) serialize as
+  zero-alloc borrows instead of allocating a fresh `String` each time, while
+  dynamic values (a file's media type, category labels) still coerce in as
+  `Cow::Owned`. Per publication that's roughly 21 -> 13 heap allocations in the
+  placeholder-cover path (more in the borrow/buy paths); every navigation,
+  facet, and pagination link in a feed drops its two constant allocations too.
+  Output is byte-identical (serde serializes `Cow<str>` as the string).
+  (`src/model.rs`, `src/catalog.rs`)
 
 - **Multi-format books (XTC/XTCH)** — a book is a logical work (`books`, grouped
   by `work_key` = title + author) backed by one or more format files

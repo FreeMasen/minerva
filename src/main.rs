@@ -381,7 +381,7 @@ fn auth_document_body(state: &AppState) -> AuthenticationDocument {
         id: format!("{base}/opds/auth"),
         title: AUTH_REALM.to_string(),
         authentication: vec![AuthenticationFlow {
-            r#type: "http://opds-spec.org/auth/basic".to_string(),
+            r#type: "http://opds-spec.org/auth/basic".into(),
             labels: Some(AuthLabels {
                 login: "Username".to_string(),
                 password: "Password".to_string(),

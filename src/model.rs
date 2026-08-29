@@ -13,6 +13,8 @@ pub const PUBLICATION_MEDIA_TYPE: &str = "application/opds-publication+json";
 /// Media type for an Authentication for OPDS document.
 pub const AUTH_MEDIA_TYPE: &str = "application/opds-authentication+json";
 
+use std::borrow::Cow;
+
 use serde::Serialize;
 
 /// An Authentication for OPDS document, describing how a client may
@@ -33,7 +35,7 @@ pub struct AuthenticationDocument {
 pub struct AuthenticationFlow {
     /// The flow type URI, e.g. `http://opds-spec.org/auth/basic`.
     #[serde(rename = "type")]
-    pub r#type: String,
+    pub r#type: Cow<'static, str>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<AuthLabels>,
@@ -99,7 +101,7 @@ impl Feed {
 pub struct Metadata {
     /// The schema.org type, serialized as `@type`, e.g. `http://schema.org/Book`.
     #[serde(rename = "@type", skip_serializing_if = "Option::is_none")]
-    pub r#type: Option<String>,
+    pub r#type: Option<Cow<'static, str>>,
 
     pub title: String,
 
@@ -173,10 +175,10 @@ pub struct Link {
     pub rel: Option<Rel>,
 
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-    pub r#type: Option<String>,
+    pub r#type: Option<Cow<'static, str>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
+    pub title: Option<Cow<'static, str>>,
 
     /// Whether `href` is a URI template (e.g. contains `{?query}`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -207,21 +209,21 @@ impl Link {
         }
     }
 
-    pub fn self_link(href: impl Into<String>, media_type: &str) -> Self {
+    pub fn self_link(href: impl Into<String>, media_type: impl Into<Cow<'static, str>>) -> Self {
         Link::new(href).with_rel("self").with_type(media_type)
     }
 
-    pub fn with_rel(mut self, rel: impl Into<String>) -> Self {
+    pub fn with_rel(mut self, rel: impl Into<Cow<'static, str>>) -> Self {
         self.rel = Some(Rel::One(rel.into()));
         self
     }
 
-    pub fn with_type(mut self, media_type: impl Into<String>) -> Self {
+    pub fn with_type(mut self, media_type: impl Into<Cow<'static, str>>) -> Self {
         self.r#type = Some(media_type.into());
         self
     }
 
-    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+    pub fn with_title(mut self, title: impl Into<Cow<'static, str>>) -> Self {
         self.title = Some(title.into());
         self
     }
@@ -247,11 +249,11 @@ impl Link {
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum Rel {
-    One(String),
+    One(Cow<'static, str>),
     /// Multiple relations on one link. Part of the model for completeness; no
     /// current link needs more than one relation.
     #[allow(dead_code)]
-    Many(Vec<String>),
+    Many(Vec<Cow<'static, str>>),
 }
 
 /// Additional metadata attached to a link, e.g. acquisition details.
@@ -285,7 +287,7 @@ pub struct LinkProperties {
 #[derive(Debug, Clone, Serialize)]
 pub struct Availability {
     /// One of `available`, `unavailable`, `reserved`, `ready`.
-    pub state: String,
+    pub state: Cow<'static, str>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
@@ -317,7 +319,7 @@ pub struct Copies {
 /// A price with an ISO 4217 currency code and a decimal value.
 #[derive(Debug, Clone, Serialize)]
 pub struct Price {
-    pub currency: String,
+    pub currency: Cow<'static, str>,
     pub value: f64,
 }
 
@@ -325,7 +327,7 @@ pub struct Price {
 #[derive(Debug, Clone, Serialize)]
 pub struct IndirectAcquisition {
     #[serde(rename = "type")]
-    pub r#type: String,
+    pub r#type: Cow<'static, str>,
 
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub child: Vec<IndirectAcquisition>,

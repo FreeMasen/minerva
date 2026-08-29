@@ -6,6 +6,7 @@
 //! either from the built-in [`sample_books`] set or from scanning a library
 //! directory. Persistence and querying live in [`crate::library`].
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use crate::epub::{self, CoverRef};
@@ -224,7 +225,7 @@ impl Book {
     /// Build the OPDS `Publication` (as embedded in a feed) for this book.
     pub fn to_publication(&self, base: &str) -> Publication {
         let mut metadata = Metadata::new(self.title.clone());
-        metadata.r#type = Some("http://schema.org/Book".to_string());
+        metadata.r#type = Some("http://schema.org/Book".into());
         metadata.identifier = Some(format!("urn:opds:book:{}", self.id));
         metadata.author = Some(Contributor::new(self.author.clone()));
         metadata.language = self.language.clone();
@@ -240,7 +241,7 @@ impl Book {
         // page), described by indirectAcquisition.
         let epub_indirect = || {
             vec![IndirectAcquisition {
-                r#type: "application/epub+zip".to_string(),
+                r#type: "application/epub+zip".into(),
                 child: Vec::new(),
             }]
         };
@@ -253,7 +254,7 @@ impl Book {
                     .with_properties(LinkProperties {
                         indirect_acquisition: epub_indirect(),
                         availability: Some(Availability {
-                            state: "available".to_string(),
+                            state: "available".into(),
                             since: None,
                             until: None,
                         }),
@@ -275,7 +276,7 @@ impl Book {
                     .with_type("text/html")
                     .with_properties(LinkProperties {
                         price: Some(Price {
-                            currency: "USD".to_string(),
+                            currency: "USD".into(),
                             value: price,
                         }),
                         indirect_acquisition: epub_indirect(),
@@ -308,9 +309,9 @@ impl Book {
 
         // Cover: a real embedded image when we have one, otherwise a generated
         // SVG placeholder (for which we know the exact dimensions).
-        let (cover_type, generated) = match &self.cover {
-            Some(c) => (c.media_type.clone(), false),
-            None => ("image/svg+xml".to_string(), true),
+        let (cover_type, generated): (Cow<'static, str>, bool) = match &self.cover {
+            Some(c) => (c.media_type.clone().into(), false),
+            None => ("image/svg+xml".into(), true),
         };
         let mut cover = Link::new(format!("{base}/opds/covers/{}", self.id))
             .with_rel("http://opds-spec.org/image")
