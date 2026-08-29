@@ -24,6 +24,7 @@ mod epub;
 mod library;
 mod model;
 mod watch;
+mod xtc;
 
 // EPUB generation is demo/test scaffolding (see the module docs).
 #[cfg(test)]
@@ -175,23 +176,20 @@ async fn run_server(cli: Cli) -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "opds_axum=debug,tower_http=debug,info".into()),
         )
         .init();
-    tracing::debug!("connecting to database");
+
     // One SQLite database holds both the catalog and the user accounts.
     let pool = db::connect(&cli.db)
         .await
         .with_context(|| format!("opening database {}", cli.db.display()))?;
-    tracing::debug!("creating Catalog");
     let catalog = Arc::new(CatalogStore::new(pool.clone()));
-    
-    tracing::debug!("setting up library dir");
+
     // A library directory is required: the catalog is reconciled against its
-    // EPUB files (the built-in sample catalog is test-only scaffolding).
+    // book files (the built-in sample catalog is test-only scaffolding).
     let library_dir = cli
         .library_dir
         .filter(|p| !p.as_os_str().is_empty())
         .context("a library directory is required: set OPDS_LIBRARY_DIR or --library-dir")?;
-    catalog.remove_sample_books().await;
-    tracing::debug!("reconcile_dir");
+    catalog.backfill_work_keys().await;
     catalog.reconcile_dir(&library_dir).await;
 
     tracing::debug!("initing auth store");
@@ -291,6 +289,7 @@ fn app(state: Arc<AppState>) -> Router {
         )
         .route("/opds/search", get(search))
         .route("/opds/download/{file}", get(download))
+        .route("/opds/download/{id}/{format}", get(download_format))
         .route("/opds/buy/{id}", get(buy))
         .route("/opds/borrow/{id}", get(borrow))
         .route("/opds/covers/{id}", get(cover))
@@ -718,27 +717,43 @@ async fn search(
 /// get a generated EPUB; file-backed books stream their bytes from disk.
 async fn download(State(state): State<Arc<AppState>>, Path(file): Path<String>) -> Response {
     let id = file.strip_suffix(".epub").unwrap_or(&file).to_string();
+    match state.catalog.get(&id).await {
+        Some(book) => sample_download(&book, &id),
+        None => not_found("No such publication"),
+    }
+}
 
+/// Serve one format of a publication (`/opds/download/{id}/{format}`), streaming
+/// the file's bytes.
+async fn download_format(
+    State(state): State<Arc<AppState>>,
+    Path((id, format)): Path<(String, String)>,
+) -> Response {
     let Some(book) = state.catalog.get(&id).await else {
         return not_found("No such publication");
     };
+    let BookSource::Files(files) = &book.source else {
+        return not_found("No such format");
+    };
+    let Some(file) = files
+        .iter()
+        .find(|f| catalog::format_ext(&f.media_type) == format)
+    else {
+        return not_found("No such format");
+    };
 
-    match &book.source {
-        BookSource::Sample => sample_download(&book, &id),
-        BookSource::File { path } => {
-            let filename = path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("book.epub")
-                .to_string();
-            let path = path.clone();
-            match tokio::fs::read(&path).await {
-                Ok(bytes) => epub_response(&filename, bytes),
-                Err(err) => {
-                    tracing::error!(?err, path = %path.display(), "failed to read EPUB file");
-                    not_found("Publication file is unavailable")
-                }
-            }
+    let filename = file
+        .path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("book")
+        .to_string();
+    let media_type = file.media_type.clone();
+    match tokio::fs::read(&file.path).await {
+        Ok(bytes) => file_response(&filename, &media_type, bytes),
+        Err(err) => {
+            tracing::error!(?err, path = %file.path.display(), "failed to read book file");
+            not_found("Publication file is unavailable")
         }
     }
 }
@@ -750,7 +765,11 @@ fn sample_download(book: &Book, id: &str) -> Response {
     if !book.is_open_access() {
         return not_found("This publication is not available for open-access download");
     }
-    epub_response(&format!("{id}.epub"), assets::epub_bytes(book))
+    file_response(
+        &format!("{id}.epub"),
+        "application/epub+zip",
+        assets::epub_bytes(book),
+    )
 }
 
 #[cfg(not(test))]
@@ -758,11 +777,11 @@ fn sample_download(_book: &Book, _id: &str) -> Response {
     not_found("No such publication")
 }
 
-/// Build an EPUB download response with an attachment filename.
-fn epub_response(filename: &str, bytes: Vec<u8>) -> Response {
+/// Build a file download response with a content type and attachment filename.
+fn file_response(filename: &str, media_type: &str, bytes: Vec<u8>) -> Response {
     (
         [
-            (header::CONTENT_TYPE, "application/epub+zip".to_string()),
+            (header::CONTENT_TYPE, media_type.to_string()),
             (
                 header::CONTENT_DISPOSITION,
                 format!("attachment; filename=\"{filename}\""),
@@ -823,8 +842,15 @@ async fn serve_cover(state: Arc<AppState>, id: String, thumbnail: bool) -> Respo
         return not_found("No such cover");
     };
 
-    if let (BookSource::File { path }, Some(cover)) = (&book.source, &book.cover) {
-        let path = path.clone();
+    // A real embedded cover lives in the book's EPUB file.
+    let epub_path = match (&book.cover, &book.source) {
+        (Some(_), BookSource::Files(files)) => files
+            .iter()
+            .find(|f| f.media_type == "application/epub+zip")
+            .map(|f| f.path.clone()),
+        _ => None,
+    };
+    if let (Some(path), Some(cover)) = (epub_path, &book.cover) {
         let zip_path = cover.zip_path.clone();
         let media_type = cover.media_type.clone();
         // Read the embedded cover (and, for a thumbnail, downscale it) off the
@@ -1360,14 +1386,13 @@ mod tests {
         let book = store.get("moby-dick").await.unwrap();
         fs::write(dir.join("first.epub"), assets::epub_bytes(&book)).unwrap();
 
-        // Reconcile clears samples (removed by the caller) and picks up the file.
-        store.remove_sample_books().await;
+        // Reconcile picks up the file; the (file-less) samples are pruned.
         store.reconcile_dir(&dir).await;
         assert_eq!(store.count().await, 1);
         let found = &store.all().await[0];
         assert_eq!(found.title, book.title);
         assert_eq!(found.author, book.author);
-        assert!(matches!(found.source, BookSource::File { .. }));
+        assert!(matches!(found.source, BookSource::Files(_)));
 
         // Removing the file and reconciling drops the book.
         fs::remove_file(dir.join("first.epub")).unwrap();
@@ -1377,39 +1402,148 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // Re-storing a book at the same file path (e.g. a re-scan after an mtime
-    // change) must update it in place — one row, stable id, no UNIQUE error.
+    // Ingesting the same file twice (e.g. a re-scan after an mtime change) must
+    // update in place — one book, one file, stable id, no UNIQUE error.
     #[tokio::test]
-    async fn upsert_file_is_idempotent_on_path() {
-        use catalog::{BookSource, Category};
-        use std::path::PathBuf;
+    async fn ingesting_same_file_twice_is_idempotent() {
+        use std::fs;
+
+        let dir = std::env::temp_dir().join(format!("opds-ingest-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let samples = CatalogStore::new(db::connect_memory().await.unwrap());
+        samples.reset_to_samples().await;
+        let book = samples.get("moby-dick").await.unwrap();
+        let path = dir.join("moby.epub");
+        fs::write(&path, assets::epub_bytes(&book)).unwrap();
 
         let store = CatalogStore::new(db::connect_memory().await.unwrap());
-        let category = Category::new("fiction", "Fiction");
-        let make = |title: &str| Book {
-            id: catalog::slugify(title),
-            title: title.to_string(),
-            author: "An Author".to_string(),
-            language: None,
-            description: None,
-            modified: None,
-            price_usd: None,
-            lendable: false,
-            source: BookSource::File {
-                path: PathBuf::from("/library/book.epub"),
-            },
-            cover: None,
-        };
-
-        store.upsert_file(&make("First Title"), Some(1), &category).await;
+        store.ingest(&dir, &path).await;
         assert_eq!(store.count().await, 1);
         let id = store.all().await[0].id.clone();
 
-        // Same path, new mtime and title: updates in place, id unchanged.
-        store.upsert_file(&make("Renamed Title"), Some(2), &category).await;
+        // Same path again: still one book, one file, same id.
+        store.ingest(&dir, &path).await;
         assert_eq!(store.count().await, 1);
-        let book = store.get(&id).await.expect("same id");
-        assert_eq!(book.title, "Renamed Title");
+        let refreshed = store.get(&id).await.expect("same id");
+        match &refreshed.source {
+            BookSource::Files(files) => assert_eq!(files.len(), 1),
+            _ => panic!("expected file-backed book"),
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Build a minimal XTC file (56-byte header + 256-byte metadata block) for a
+    /// given work, so tests can exercise the format without a real converter.
+    fn xtc_bytes(title: &str, author: &str) -> Vec<u8> {
+        fn field(s: &str, n: usize) -> Vec<u8> {
+            let mut b = s.as_bytes().to_vec();
+            b.truncate(n - 1);
+            b.resize(n, 0);
+            b
+        }
+        let mut header = vec![0u8; 56];
+        header[0..4].copy_from_slice(&0x0043_5458u32.to_le_bytes()); // "XTC\0"
+        header[0x09] = 1; // has_metadata
+        header[0x10..0x18].copy_from_slice(&56u64.to_le_bytes()); // metadata follows header
+
+        let mut block = Vec::with_capacity(256);
+        block.extend(field(title, 128));
+        block.extend(field(author, 64));
+        block.extend(field("", 32)); // publisher
+        block.extend(field("en", 16)); // language
+        block.extend(1_443_545_000u32.to_le_bytes()); // creation_time
+        block.extend(0u16.to_le_bytes()); // cover_page
+        block.resize(256, 0);
+
+        header.extend(block);
+        header
+    }
+
+    // An EPUB and an XTC describing the same work (matching title + author) group
+    // into one logical book with a separate open-access download link per format,
+    // and each format streams from its own path.
+    #[tokio::test]
+    async fn epub_and_xtc_of_same_work_group_into_one_book() {
+        use std::fs;
+
+        let dir =
+            std::env::temp_dir().join(format!("opds-multiformat-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let samples = CatalogStore::new(db::connect_memory().await.unwrap());
+        samples.reset_to_samples().await;
+        let book = samples.get("moby-dick").await.unwrap();
+        fs::write(dir.join("moby.epub"), assets::epub_bytes(&book)).unwrap();
+        fs::write(dir.join("moby.xtc"), xtc_bytes(&book.title, &book.author)).unwrap();
+
+        let store = CatalogStore::new(db::connect_memory().await.unwrap());
+        store.reconcile_dir(&dir).await;
+
+        // Grouped: one logical book carrying both format files.
+        assert_eq!(store.count().await, 1);
+        let stored = store.all().await.remove(0);
+        let id = stored.id.clone();
+        let media_types: Vec<String> = match &stored.source {
+            BookSource::Files(files) => files.iter().map(|f| f.media_type.clone()).collect(),
+            _ => panic!("expected file-backed book"),
+        };
+        assert!(media_types.contains(&"application/epub+zip".to_string()));
+        assert!(media_types.contains(&"application/x-xtc".to_string()));
+
+        let app = app(Arc::new(AppState {
+            base_url: BASE.to_string(),
+            catalog: Arc::new(store),
+            auth: None,
+            library_dir: Some(dir.clone()),
+        }));
+
+        // The publication advertises one open-access link per format.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/opds/publications/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json: Value = serde_json::from_slice(&bytes).unwrap();
+        let mut open: Vec<&str> = json["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|l| l["rel"] == "http://opds-spec.org/acquisition/open-access")
+            .map(|l| l["type"].as_str().unwrap())
+            .collect();
+        open.sort_unstable();
+        assert_eq!(open, ["application/epub+zip", "application/x-xtc"]);
+
+        // Both formats download, each with its own media type.
+        for (format, content_type) in [
+            ("epub", "application/epub+zip"),
+            ("xtc", "application/x-xtc"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/opds/download/{id}/{format}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "download {format}");
+            assert_eq!(resp.headers()[header::CONTENT_TYPE], content_type);
+        }
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

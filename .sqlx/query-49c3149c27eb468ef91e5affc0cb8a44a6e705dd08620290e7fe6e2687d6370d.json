@@ -1,61 +1,56 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT b.id AS \"id!\", b.file_path, b.title AS \"title!\", b.author AS \"author!\",\n                      b.language, b.description, b.modified, b.price_usd,\n                      b.lendable AS \"lendable!\", b.cover_zip_path, b.cover_media_type\n               FROM books b\n               JOIN book_categories bc ON bc.book_id = b.id\n               WHERE bc.category_slug = ?\n               ORDER BY b.title COLLATE NOCASE",
+  "query": "SELECT id, title, author, language, description, modified,\n                    price_usd, lendable, cover_zip_path, cover_media_type\n             FROM books WHERE id = ?",
   "describe": {
     "columns": [
       {
-        "name": "id!",
+        "name": "id",
         "ordinal": 0,
         "type_info": "Text"
       },
       {
-        "name": "file_path",
+        "name": "title",
         "ordinal": 1,
         "type_info": "Text"
       },
       {
-        "name": "title!",
+        "name": "author",
         "ordinal": 2,
         "type_info": "Text"
       },
       {
-        "name": "author!",
+        "name": "language",
         "ordinal": 3,
         "type_info": "Text"
       },
       {
-        "name": "language",
+        "name": "description",
         "ordinal": 4,
         "type_info": "Text"
       },
       {
-        "name": "description",
+        "name": "modified",
         "ordinal": 5,
         "type_info": "Text"
       },
       {
-        "name": "modified",
-        "ordinal": 6,
-        "type_info": "Text"
-      },
-      {
         "name": "price_usd",
-        "ordinal": 7,
+        "ordinal": 6,
         "type_info": "Float"
       },
       {
-        "name": "lendable!",
-        "ordinal": 8,
+        "name": "lendable",
+        "ordinal": 7,
         "type_info": "Integer"
       },
       {
         "name": "cover_zip_path",
-        "ordinal": 9,
+        "ordinal": 8,
         "type_info": "Text"
       },
       {
         "name": "cover_media_type",
-        "ordinal": 10,
+        "ordinal": 9,
         "type_info": "Text"
       }
     ],
@@ -64,7 +59,6 @@
     },
     "nullable": [
       false,
-      true,
       false,
       false,
       true,
@@ -76,5 +70,5 @@
       true
     ]
   },
-  "hash": "bada4b8c4828ba94c299909db1832b9c925ba7900a33ae87eebfc6ff9aaf0995"
+  "hash": "49c3149c27eb468ef91e5affc0cb8a44a6e705dd08620290e7fe6e2687d6370d"
 }

@@ -1,9 +1,10 @@
-//! The catalog domain types and EPUB scanning.
+//! The catalog domain types and library scanning.
 //!
 //! [`Book`] is the server's own representation of a publication (as opposed to
-//! the wire `Publication`). Books come either from the built-in [`sample_books`]
-//! set or from scanning a directory of EPUB files; persistence and querying live
-//! in [`crate::library`].
+//! the wire `Publication`). A book is a logical work that may be backed by
+//! several format files (EPUB, XTC/XTCH) grouped by title + author; books come
+//! either from the built-in [`sample_books`] set or from scanning a library
+//! directory. Persistence and querying live in [`crate::library`].
 
 use std::path::{Path, PathBuf};
 
@@ -33,13 +34,20 @@ pub struct Book {
     pub cover: Option<CoverRef>,
 }
 
-/// The origin of a book's downloadable content.
+/// Where a book's downloadable content comes from.
 #[derive(Debug, Clone)]
 pub enum BookSource {
-    /// A synthetic sample; its EPUB and cover are generated on demand.
+    /// A synthetic sample; its EPUB and cover are generated on demand (tests).
     Sample,
-    /// A real EPUB file on disk.
-    File { path: PathBuf },
+    /// One or more real format files on disk, best-metadata format first.
+    Files(Vec<BookFile>),
+}
+
+/// A single format file backing a book.
+#[derive(Debug, Clone)]
+pub struct BookFile {
+    pub path: PathBuf,
+    pub media_type: String,
 }
 
 /// A category a book can belong to. Categories are arbitrary and created on
@@ -59,17 +67,63 @@ impl Category {
     }
 }
 
-/// Whether a path names an EPUB file (by extension).
-pub(crate) fn is_epub(path: &Path) -> bool {
-    path.extension()
-        .and_then(|s| s.to_str())
-        .map(|s| s.eq_ignore_ascii_case("epub"))
-        .unwrap_or(false)
+/// The media type for a supported book file, by extension (`None` if not a
+/// recognized book format).
+pub(crate) fn media_type_for(path: &Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "epub" => Some("application/epub+zip"),
+        "xtc" => Some("application/x-xtc"),
+        "xtch" => Some("application/x-xtch"),
+        _ => None,
+    }
 }
 
-/// Recursively collect the `.epub` files under `root`, sorted. Symlinks are not
-/// followed, so symlinked directories can't cause cycles.
-pub(crate) fn epub_paths(root: &Path) -> Vec<PathBuf> {
+/// Whether a path names a supported book file.
+pub(crate) fn is_book_file(path: &Path) -> bool {
+    media_type_for(path).is_some()
+}
+
+/// A format's metadata richness: the highest-ranked format present supplies a
+/// work's title/author/cover. EPUB carries the fullest metadata.
+pub(crate) fn format_rank(media_type: &str) -> i64 {
+    match media_type {
+        "application/epub+zip" => 2,
+        _ => 1,
+    }
+}
+
+/// The URL path segment (and file extension) used to request a given format.
+pub(crate) fn format_ext(media_type: &str) -> &'static str {
+    match media_type {
+        "application/epub+zip" => "epub",
+        "application/x-xtch" => "xtch",
+        "application/x-xtc" => "xtc",
+        _ => "bin",
+    }
+}
+
+/// Read metadata from a supported book file, dispatching on its format.
+pub(crate) fn read_meta(path: &Path) -> std::io::Result<epub::EpubMeta> {
+    match media_type_for(path) {
+        Some("application/epub+zip") => epub::read_meta(path),
+        Some("application/x-xtc" | "application/x-xtch") => crate::xtc::read_meta(path),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unsupported book format",
+        )),
+    }
+}
+
+/// A stable grouping key for a logical work (its title and author, slugified).
+/// Files that produce the same key are treated as formats of the same book.
+pub(crate) fn work_key(title: &str, author: &str) -> String {
+    format!("{}|{}", slugify(title), slugify(author))
+}
+
+/// Recursively collect the supported book files under `root`, sorted. Symlinks
+/// are not followed, so symlinked directories can't cause cycles.
+pub(crate) fn book_file_paths(root: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = walkdir::WalkDir::new(root)
         .follow_links(false)
         .into_iter()
@@ -82,39 +136,17 @@ pub(crate) fn epub_paths(root: &Path) -> Vec<PathBuf> {
         })
         .filter(|entry| entry.file_type().is_file())
         .map(walkdir::DirEntry::into_path)
-        .filter(|path| is_epub(path))
+        .filter(|path| is_book_file(path))
         .collect();
 
     out.sort();
     out
 }
 
-/// Build a [`Book`] from a scanned EPUB file and its metadata, along with the
-/// default category to file it under. The id is a provisional slug (the store
-/// deduplicates on insert).
-pub(crate) fn book_from_file(root: &Path, path: PathBuf, meta: epub::EpubMeta) -> (Book, Category) {
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("book");
-    let category = derive_category(root, &path, &meta.subjects);
-
-    let book = Book {
-        id: slugify(meta.title.as_deref().unwrap_or(stem)),
-        title: meta.title.unwrap_or_else(|| stem.to_string()),
-        author: meta.author.unwrap_or_else(|| "Unknown Author".to_string()),
-        language: meta.language,
-        description: meta.description,
-        modified: meta.modified.as_deref().and_then(parse_timestamp),
-        price_usd: None,
-        lendable: false,
-        source: BookSource::File { path },
-        cover: meta.cover,
-    };
-    (book, category)
-}
-
 /// Derive a book's default category when first scanned: prefer a top-level
 /// `Fiction`/`Non-Fiction` library subfolder, else classify from the EPUB's
 /// Dublin Core subjects (defaulting to non-fiction).
-fn derive_category(root: &Path, path: &Path, subjects: &[String]) -> Category {
+pub(crate) fn derive_category(root: &Path, path: &Path, subjects: &[String]) -> Category {
     category_from_folder(root, path).unwrap_or_else(|| classify_subjects(subjects))
 }
 
@@ -212,44 +244,67 @@ impl Book {
                 child: Vec::new(),
             }]
         };
-        let acquisition = if self.lendable {
-            Link::new(format!("{base}/opds/borrow/{}", self.id))
-                .with_rel("http://opds-spec.org/acquisition/borrow")
-                .with_type("text/html")
-                .with_properties(LinkProperties {
-                    indirect_acquisition: epub_indirect(),
-                    availability: Some(Availability {
-                        state: "available".to_string(),
-                        since: None,
-                        until: None,
+        let mut links = vec![self_link];
+        if self.lendable {
+            links.push(
+                Link::new(format!("{base}/opds/borrow/{}", self.id))
+                    .with_rel("http://opds-spec.org/acquisition/borrow")
+                    .with_type("text/html")
+                    .with_properties(LinkProperties {
+                        indirect_acquisition: epub_indirect(),
+                        availability: Some(Availability {
+                            state: "available".to_string(),
+                            since: None,
+                            until: None,
+                        }),
+                        copies: Some(Copies {
+                            total: Some(3),
+                            available: Some(2),
+                        }),
+                        holds: Some(Holds {
+                            total: Some(1),
+                            position: None,
+                        }),
+                        ..Default::default()
                     }),
-                    copies: Some(Copies {
-                        total: Some(3),
-                        available: Some(2),
-                    }),
-                    holds: Some(Holds {
-                        total: Some(1),
-                        position: None,
-                    }),
-                    ..Default::default()
-                })
+            );
         } else if let Some(price) = self.price_usd {
-            Link::new(format!("{base}/opds/buy/{}", self.id))
-                .with_rel("http://opds-spec.org/acquisition/buy")
-                .with_type("text/html")
-                .with_properties(LinkProperties {
-                    price: Some(Price {
-                        currency: "USD".to_string(),
-                        value: price,
+            links.push(
+                Link::new(format!("{base}/opds/buy/{}", self.id))
+                    .with_rel("http://opds-spec.org/acquisition/buy")
+                    .with_type("text/html")
+                    .with_properties(LinkProperties {
+                        price: Some(Price {
+                            currency: "USD".to_string(),
+                            value: price,
+                        }),
+                        indirect_acquisition: epub_indirect(),
+                        ..Default::default()
                     }),
-                    indirect_acquisition: epub_indirect(),
-                    ..Default::default()
-                })
+            );
         } else {
-            Link::new(format!("{base}/opds/download/{}.epub", self.id))
-                .with_rel("http://opds-spec.org/acquisition/open-access")
-                .with_type("application/epub+zip")
-        };
+            // Open access: one download link per available format.
+            match &self.source {
+                BookSource::Sample => links.push(
+                    Link::new(format!("{base}/opds/download/{}.epub", self.id))
+                        .with_rel("http://opds-spec.org/acquisition/open-access")
+                        .with_type("application/epub+zip"),
+                ),
+                BookSource::Files(files) => {
+                    for file in files {
+                        links.push(
+                            Link::new(format!(
+                                "{base}/opds/download/{}/{}",
+                                self.id,
+                                format_ext(&file.media_type)
+                            ))
+                            .with_rel("http://opds-spec.org/acquisition/open-access")
+                            .with_type(file.media_type.clone()),
+                        );
+                    }
+                }
+            }
+        }
 
         // Cover: a real embedded image when we have one, otherwise a generated
         // SVG placeholder (for which we know the exact dimensions).
@@ -270,7 +325,7 @@ impl Book {
 
         Publication {
             metadata,
-            links: vec![self_link, acquisition],
+            links,
             images: vec![cover, thumbnail],
         }
     }

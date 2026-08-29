@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "DELETE FROM books WHERE file_path = ?",
+  "query": "DELETE FROM book_files WHERE path = ?",
   "describe": {
     "columns": [],
     "parameters": {
@@ -8,5 +8,5 @@
     },
     "nullable": []
   },
-  "hash": "4557ea9420abf877bde54d3e0017b589b81e8e059dcf78325ebe9e801368efa3"
+  "hash": "b085edd43957066bfe9a563feed01f92df703b8a31601eec0c4a071c28deb497"
 }

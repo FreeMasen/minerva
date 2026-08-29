@@ -1,26 +1,30 @@
 //! The catalog persisted in SQLite (via sqlx).
 //!
-//! Rather than holding every book in memory, the catalog lives in a `books`
-//! table and handlers query it per request. The store is also the shared,
-//! mutable state the file watcher updates as EPUBs come and go. Connections come
-//! from a pool, so reads can proceed concurrently.
+//! A book is a logical *work* (the `books` table) with one or more format files
+//! (the `book_files` table): scanning an EPUB and an XTC of the same work — same
+//! title and author, via `work_key` — attaches both to one book. The book's
+//! metadata and cover come from the highest-`meta_rank` format present.
 //!
-//! Categories are arbitrary, created on demand, and joined to books many-to-many
-//! via the `categories` and `book_categories` tables.
+//! Rather than holding every book in memory, the catalog is queried per request.
+//! The store is also the shared, mutable state the file watcher updates as files
+//! come and go, and connections come from a pool so reads proceed concurrently.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use sqlx::SqlitePool;
 
-use crate::catalog::{self, Book, BookSource, Category};
-use crate::epub::CoverRef;
+use crate::catalog::{self, Book, BookFile, BookSource, Category};
+use crate::epub::{CoverRef, EpubMeta};
 
-/// A flat row from the `books` table, convertible to a [`Book`].
+/// The `books` columns loaded into a [`BookRow`], in a fixed order.
+const BOOK_COLUMNS: &str = "id, title, author, language, description, modified, \
+     price_usd, lendable, cover_zip_path, cover_media_type";
+
+/// A flat row from the `books` table; combined with its files to make a [`Book`].
 #[derive(sqlx::FromRow)]
 struct BookRow {
     id: String,
-    file_path: Option<String>,
     title: String,
     author: String,
     language: Option<String>,
@@ -33,12 +37,11 @@ struct BookRow {
 }
 
 impl BookRow {
-    fn into_book(self) -> Book {
-        let source = match self.file_path {
-            Some(path) => BookSource::File {
-                path: PathBuf::from(path),
-            },
-            None => BookSource::Sample,
+    fn into_book(self, files: Vec<BookFile>) -> Book {
+        let source = if files.is_empty() {
+            BookSource::Sample
+        } else {
+            BookSource::Files(files)
         };
         let cover = match (self.cover_zip_path, self.cover_media_type) {
             (Some(zip_path), Some(media_type)) => Some(CoverRef {
@@ -85,9 +88,9 @@ impl CatalogStore {
 
     /// Look up a single book by id.
     pub async fn get(&self, id: &str) -> Option<Book> {
-        sqlx::query_as!(
+        let row = sqlx::query_as!(
             BookRow,
-            "SELECT id, file_path, title, author, language, description, modified,
+            "SELECT id, title, author, language, description, modified,
                     price_usd, lendable, cover_zip_path, cover_media_type
              FROM books WHERE id = ?",
             id
@@ -95,17 +98,18 @@ impl CatalogStore {
         .fetch_optional(&self.pool)
         .await
         .ok()
-        .flatten()
-        .map(BookRow::into_book)
+        .flatten()?;
+        let files = self.files_for(&row.id).await;
+        Some(row.into_book(files))
     }
 
     /// A page of books ordered by title.
     pub async fn page(&self, limit: u64, offset: u64) -> Vec<Book> {
         let limit = limit as i64;
         let offset = offset as i64;
-        sqlx::query_as!(
+        let rows = sqlx::query_as!(
             BookRow,
-            "SELECT id, file_path, title, author, language, description, modified,
+            "SELECT id, title, author, language, description, modified,
                     price_usd, lendable, cover_zip_path, cover_media_type
              FROM books ORDER BY title COLLATE NOCASE LIMIT ? OFFSET ?",
             limit,
@@ -113,47 +117,44 @@ impl CatalogStore {
         )
         .fetch_all(&self.pool)
         .await
-        .map(into_books)
-        .unwrap_or_default()
+        .unwrap_or_default();
+        self.hydrate(rows).await
     }
 
     /// The most recently modified books, newest first.
     pub async fn recent(&self, limit: u64) -> Vec<Book> {
         let limit = limit as i64;
-        sqlx::query_as!(
+        let rows = sqlx::query_as!(
             BookRow,
-            "SELECT id, file_path, title, author, language, description, modified,
+            "SELECT id, title, author, language, description, modified,
                     price_usd, lendable, cover_zip_path, cover_media_type
              FROM books ORDER BY modified DESC LIMIT ?",
             limit
         )
         .fetch_all(&self.pool)
         .await
-        .map(into_books)
-        .unwrap_or_default()
+        .unwrap_or_default();
+        self.hydrate(rows).await
     }
 
     /// All books, ordered by title (used by tests).
     #[cfg_attr(not(test), allow(dead_code))]
     pub async fn all(&self) -> Vec<Book> {
-        sqlx::query_as!(
+        let rows = sqlx::query_as!(
             BookRow,
-            "SELECT id, file_path, title, author, language, description, modified,
+            "SELECT id, title, author, language, description, modified,
                     price_usd, lendable, cover_zip_path, cover_media_type
              FROM books ORDER BY title COLLATE NOCASE"
         )
         .fetch_all(&self.pool)
         .await
-        .map(into_books)
-        .unwrap_or_default()
+        .unwrap_or_default();
+        self.hydrate(rows).await
     }
 
     /// Search books. `query` matches title/author/description; `author` and
     /// `title` constrain those fields. All supplied (already-lowercased) terms
     /// must match. With no terms, returns nothing.
-    ///
-    /// The `WHERE` clause is dynamic, so this uses the runtime query builder
-    /// (not the compile-checked macro).
     pub async fn search(&self, query: &str, author: &str, title: &str) -> Vec<Book> {
         let mut clauses: Vec<&str> = Vec::new();
         let mut binds: Vec<String> = Vec::new();
@@ -181,20 +182,45 @@ impl CatalogStore {
         }
 
         let sql = format!(
-            "SELECT id, file_path, title, author, language, description, modified,
-                    price_usd, lendable, cover_zip_path, cover_media_type
-             FROM books WHERE {} ORDER BY title COLLATE NOCASE",
+            "SELECT {BOOK_COLUMNS} FROM books WHERE {} ORDER BY title COLLATE NOCASE",
             clauses.join(" AND ")
         );
         let mut query = sqlx::query_as::<_, BookRow>(&sql);
         for bind in binds {
             query = query.bind(bind);
         }
-        query
-            .fetch_all(&self.pool)
-            .await
-            .map(into_books)
-            .unwrap_or_default()
+        let rows = query.fetch_all(&self.pool).await.unwrap_or_default();
+        self.hydrate(rows).await
+    }
+
+    /// Turn book rows into books by attaching each one's format files.
+    async fn hydrate(&self, rows: Vec<BookRow>) -> Vec<Book> {
+        let mut books = Vec::with_capacity(rows.len());
+        for row in rows {
+            let files = self.files_for(&row.id).await;
+            books.push(row.into_book(files));
+        }
+        books
+    }
+
+    /// The format files for a book, best-metadata format first.
+    async fn files_for(&self, book_id: &str) -> Vec<BookFile> {
+        sqlx::query!(
+            r#"SELECT path AS "path!", media_type AS "media_type!"
+               FROM book_files WHERE book_id = ? ORDER BY media_type"#,
+            book_id
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(|r| BookFile {
+                    path: PathBuf::from(r.path),
+                    media_type: r.media_type,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
     }
 
     // --- Categories ---
@@ -230,9 +256,9 @@ impl CatalogStore {
 
     /// All books in a category (by slug), ordered by title.
     pub async fn books_in_category(&self, slug: &str) -> Vec<Book> {
-        sqlx::query_as!(
+        let rows = sqlx::query_as!(
             BookRow,
-            r#"SELECT b.id AS "id!", b.file_path, b.title AS "title!", b.author AS "author!",
+            r#"SELECT b.id AS "id!", b.title AS "title!", b.author AS "author!",
                       b.language, b.description, b.modified, b.price_usd,
                       b.lendable AS "lendable!", b.cover_zip_path, b.cover_media_type
                FROM books b
@@ -243,8 +269,8 @@ impl CatalogStore {
         )
         .fetch_all(&self.pool)
         .await
-        .map(into_books)
-        .unwrap_or_default()
+        .unwrap_or_default();
+        self.hydrate(rows).await
     }
 
     /// The categories a book belongs to, ordered by label.
@@ -272,7 +298,6 @@ impl CatalogStore {
     pub async fn assign_category(&self, book_id: &str, name: &str) -> Result<Category, sqlx::Error> {
         let category = Category::new(catalog::slugify(name), name.trim());
         self.seed_category(book_id, &category).await?;
-        // Reflect the stored label, which wins if the category already existed.
         Ok(self.category(&category.slug).await.unwrap_or(category))
     }
 
@@ -285,6 +310,25 @@ impl CatalogStore {
         )
         .execute(&self.pool)
         .await;
+    }
+
+    /// Create the category if needed and associate it with the book.
+    async fn seed_category(&self, book_id: &str, category: &Category) -> Result<(), sqlx::Error> {
+        sqlx::query!(
+            "INSERT OR IGNORE INTO categories (slug, label) VALUES (?, ?)",
+            category.slug,
+            category.label
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query!(
+            "INSERT OR IGNORE INTO book_categories (book_id, category_slug) VALUES (?, ?)",
+            book_id,
+            category.slug
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     // --- Authors (a category-like browse dimension derived from the author
@@ -318,128 +362,20 @@ impl CatalogStore {
 
     /// All books by an author, ordered by title.
     pub async fn books_by_author(&self, author: &str) -> Vec<Book> {
-        sqlx::query_as!(
+        let rows = sqlx::query_as!(
             BookRow,
-            "SELECT id, file_path, title, author, language, description, modified,
+            "SELECT id, title, author, language, description, modified,
                     price_usd, lendable, cover_zip_path, cover_media_type
              FROM books WHERE author = ? ORDER BY title COLLATE NOCASE",
             author
         )
         .fetch_all(&self.pool)
         .await
-        .map(into_books)
-        .unwrap_or_default()
+        .unwrap_or_default();
+        self.hydrate(rows).await
     }
 
-    /// Create the category if needed and associate it with the book.
-    async fn seed_category(&self, book_id: &str, category: &Category) -> Result<(), sqlx::Error> {
-        sqlx::query!(
-            "INSERT OR IGNORE INTO categories (slug, label) VALUES (?, ?)",
-            category.slug,
-            category.label
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query!(
-            "INSERT OR IGNORE INTO book_categories (book_id, category_slug) VALUES (?, ?)",
-            book_id,
-            category.slug
-        )
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    // --- Mutations used at startup and by the watcher ---
-
-    /// Replace the whole catalog with the built-in sample set (test-only).
-    #[cfg(test)]
-    pub async fn reset_to_samples(&self) {
-        if let Err(err) = sqlx::query!("DELETE FROM books").execute(&self.pool).await {
-            tracing::error!(?err, "failed to clear catalog");
-            return;
-        }
-        for (book, category) in catalog::sample_books() {
-            if let Err(err) = self.insert(&book.id, &book, None).await {
-                tracing::error!(?err, id = %book.id, "failed to seed sample book");
-                continue;
-            }
-            if let Err(err) = self.seed_category(&book.id, &category).await {
-                tracing::error!(?err, id = %book.id, "failed to seed sample category");
-            }
-        }
-    }
-
-    /// Remove sample (non-file) books.
-    pub async fn remove_sample_books(&self) {
-        let _ = sqlx::query!("DELETE FROM books WHERE file_path IS NULL")
-            .execute(&self.pool)
-            .await;
-    }
-
-    /// Reconcile the catalog with the current contents of `dir`: unchanged files
-    /// (matching stored mtime) are skipped, changed/new files are (re)read, and
-    /// rows for files that no longer exist are removed.
-    pub async fn reconcile_dir(&self, dir: &Path) {
-        let paths = catalog::epub_paths(dir);
-        let mut seen: HashSet<PathBuf> = HashSet::new();
-
-        for path in &paths {
-            seen.insert(path.clone());
-            let mtime = file_mtime(path);
-            if mtime.is_some() && self.stored_mtime(path).await == mtime {
-                continue; // unchanged since last scan
-            }
-            match crate::epub::read_meta(path) {
-                Ok(meta) => {
-                    let (book, category) = catalog::book_from_file(dir, path.clone(), meta);
-                    self.upsert_file(&book, mtime, &category).await;
-                }
-                Err(err) => {
-                    tracing::warn!(?err, path = %path.display(), "skipping unreadable EPUB");
-                }
-            }
-        }
-
-        self.delete_missing(&seen).await;
-        let count = self.count().await;
-        tracing::info!(count, dir = %dir.display(), "catalog reconciled");
-    }
-
-    /// Insert or update a single file-backed book, keeping its id stable across
-    /// metadata changes. A newly-inserted book is filed under `default_category`;
-    /// updates leave a book's (possibly hand-edited) categories untouched.
-    pub async fn upsert_file(&self, book: &Book, mtime: Option<i64>, default_category: &Category) {
-        let BookSource::File { path } = &book.source else {
-            return;
-        };
-        let path = path.to_string_lossy().into_owned();
-
-        // Whether this file is already known decides id allocation and default-
-        // category seeding. The write itself is an atomic upsert keyed on
-        // file_path, so a stale answer here is harmless (at worst a default
-        // category is re-seeded).
-        let is_new = sqlx::query_scalar!("SELECT id FROM books WHERE file_path = ?", path)
-            .fetch_optional(&self.pool)
-            .await
-            .ok()
-            .flatten()
-            .is_none();
-
-        // On conflict the existing id is kept, so this id is only used for a
-        // genuinely new row; free_id keeps it from colliding with another book.
-        let id = self.free_id(&book.id).await;
-        if let Err(err) = self.insert(&id, book, mtime).await {
-            tracing::error!(?err, path, "failed to store book");
-            return;
-        }
-
-        if is_new {
-            if let Err(err) = self.seed_category(&id, default_category).await {
-                tracing::error!(?err, path, "failed to seed book category");
-            }
-        }
-    }
+    // --- Management (CLI / admin) ---
 
     /// Set a book's title. Returns whether a book with that id existed.
     pub async fn set_title(&self, id: &str, title: &str) -> Result<bool, sqlx::Error> {
@@ -457,7 +393,8 @@ impl CatalogStore {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Remove a book (and its category associations). Returns whether it existed.
+    /// Remove a book (and its files/category associations). Returns whether it
+    /// existed.
     pub async fn remove_book(&self, id: &str) -> Result<bool, sqlx::Error> {
         let result = sqlx::query!("DELETE FROM books WHERE id = ?", id)
             .execute(&self.pool)
@@ -465,15 +402,201 @@ impl CatalogStore {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Delete the book backed by a specific file path, if any.
-    pub async fn delete_by_path(&self, path: &Path) {
-        let path = path.to_string_lossy();
-        let _ = sqlx::query!("DELETE FROM books WHERE file_path = ?", path)
-            .execute(&self.pool)
-            .await;
+    // --- Reconciliation with the library directory ---
+
+    /// Backfill `work_key` for books that predate it (e.g. after migration), so
+    /// re-scanning their files groups onto the same book instead of duplicating.
+    pub async fn backfill_work_keys(&self) {
+        let rows = sqlx::query!(
+            r#"SELECT id AS "id!", title AS "title!", author AS "author!"
+               FROM books WHERE work_key IS NULL"#
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        for row in rows {
+            let key = catalog::work_key(&row.title, &row.author);
+            let _ = sqlx::query!("UPDATE books SET work_key = ? WHERE id = ?", key, row.id)
+                .execute(&self.pool)
+                .await;
+        }
     }
 
-    /// Whether any book is stored under the directory `dir` (used by the watcher
+    /// Reconcile the catalog with the current contents of `dir`: unchanged files
+    /// (matching stored mtime) are skipped, changed/new files are (re)read and
+    /// ingested, files that no longer exist are removed, and books left with no
+    /// files are deleted.
+    pub async fn reconcile_dir(&self, dir: &Path) {
+        let paths = catalog::book_file_paths(dir);
+        let mut seen: HashSet<PathBuf> = HashSet::new();
+
+        for path in &paths {
+            seen.insert(path.clone());
+            let mtime = file_mtime(path);
+            if mtime.is_some() && self.stored_file_mtime(path).await == mtime {
+                continue; // unchanged since last scan
+            }
+            match catalog::read_meta(path) {
+                Ok(meta) => self.ingest_file(dir, path, meta, mtime).await,
+                Err(err) => {
+                    tracing::warn!(?err, path = %path.display(), "skipping unreadable book file");
+                }
+            }
+        }
+
+        self.delete_missing_files(&seen).await;
+        self.delete_orphan_books().await;
+        let count = self.count().await;
+        tracing::info!(count, dir = %dir.display(), "catalog reconciled");
+    }
+
+    /// Read and ingest a single file (used by the watcher for a create/modify).
+    pub async fn ingest(&self, dir: &Path, path: &Path) {
+        let mtime = file_mtime(path);
+        match catalog::read_meta(path) {
+            Ok(meta) => self.ingest_file(dir, path, meta, mtime).await,
+            Err(err) => {
+                tracing::warn!(?err, path = %path.display(), "dropping unreadable book file");
+                self.delete_by_path(path).await;
+            }
+        }
+    }
+
+    /// Attach a file to its work (creating the book if new), applying metadata
+    /// from the richer format.
+    async fn ingest_file(&self, dir: &Path, path: &Path, meta: EpubMeta, mtime: Option<i64>) {
+        let path_str = path.to_string_lossy().into_owned();
+        let media_type = catalog::media_type_for(path).unwrap_or("application/octet-stream");
+        let rank = catalog::format_rank(media_type);
+
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("book");
+        let title = meta.title.clone().unwrap_or_else(|| stem.to_string());
+        let author = meta
+            .author
+            .clone()
+            .unwrap_or_else(|| "Unknown Author".to_string());
+        let work = catalog::work_key(&title, &author);
+
+        let existing = sqlx::query!(
+            r#"SELECT id AS "id!", meta_rank AS "meta_rank!: i64" FROM books WHERE work_key = ?"#,
+            work
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten();
+
+        let book_id = match existing {
+            Some(record) => {
+                if rank > record.meta_rank {
+                    self.write_metadata(&record.id, &meta, &title, &author, rank).await;
+                }
+                record.id
+            }
+            None => {
+                let id = self.free_id(&catalog::slugify(&title)).await;
+                self.create_book(&id, &work, &meta, &title, &author, rank).await;
+                let category = catalog::derive_category(dir, path, &meta.subjects);
+                if let Err(err) = self.seed_category(&id, &category).await {
+                    tracing::error!(?err, id, "failed to seed book category");
+                }
+                id
+            }
+        };
+
+        let _ = sqlx::query!(
+            "INSERT INTO book_files (path, book_id, media_type, file_mtime)
+                 VALUES (?, ?, ?, ?)
+             ON CONFLICT(path) DO UPDATE SET
+                 book_id = excluded.book_id,
+                 media_type = excluded.media_type,
+                 file_mtime = excluded.file_mtime",
+            path_str,
+            book_id,
+            media_type,
+            mtime,
+        )
+        .execute(&self.pool)
+        .await;
+    }
+
+    /// Insert a new book (work) from a format's metadata.
+    async fn create_book(
+        &self,
+        id: &str,
+        work: &str,
+        meta: &EpubMeta,
+        title: &str,
+        author: &str,
+        rank: i64,
+    ) {
+        let (cover_zip, cover_type) = meta_cover_columns(meta);
+        let language = meta.language.as_deref();
+        let description = meta.description.as_deref();
+        let modified = normalize_modified(meta);
+        if let Err(err) = sqlx::query!(
+            "INSERT INTO books (id, work_key, title, author, language, description,
+                 modified, cover_zip_path, cover_media_type, meta_rank)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            id,
+            work,
+            title,
+            author,
+            language,
+            description,
+            modified,
+            cover_zip,
+            cover_type,
+            rank,
+        )
+        .execute(&self.pool)
+        .await
+        {
+            tracing::error!(?err, id, "failed to create book");
+        }
+    }
+
+    /// Replace a book's metadata (a richer format was found).
+    async fn write_metadata(
+        &self,
+        id: &str,
+        meta: &EpubMeta,
+        title: &str,
+        author: &str,
+        rank: i64,
+    ) {
+        let (cover_zip, cover_type) = meta_cover_columns(meta);
+        let language = meta.language.as_deref();
+        let description = meta.description.as_deref();
+        let modified = normalize_modified(meta);
+        let _ = sqlx::query!(
+            "UPDATE books SET title = ?, author = ?, language = ?, description = ?,
+                 modified = ?, cover_zip_path = ?, cover_media_type = ?, meta_rank = ?
+             WHERE id = ?",
+            title,
+            author,
+            language,
+            description,
+            modified,
+            cover_zip,
+            cover_type,
+            rank,
+            id,
+        )
+        .execute(&self.pool)
+        .await;
+    }
+
+    /// Delete the file at a specific path and any book left with no files.
+    pub async fn delete_by_path(&self, path: &Path) {
+        let path = path.to_string_lossy();
+        let _ = sqlx::query!("DELETE FROM book_files WHERE path = ?", path)
+            .execute(&self.pool)
+            .await;
+        self.delete_orphan_books().await;
+    }
+
+    /// Whether any file is stored under the directory `dir` (used by the watcher
     /// to decide whether a removed directory affected the catalog).
     pub async fn has_books_under(&self, dir: &Path) -> bool {
         let mut prefix = dir.to_string_lossy().into_owned();
@@ -481,62 +604,20 @@ impl CatalogStore {
             prefix.push('/');
         }
         prefix.push('%');
-        sqlx::query_scalar!("SELECT id FROM books WHERE file_path LIKE ? LIMIT 1", prefix)
-            .fetch_optional(&self.pool)
-            .await
-            .ok()
-            .flatten()
-            .is_some()
-    }
-
-    /// Insert a book row, or (for a file-backed book whose path is already
-    /// stored) update it in place, keeping its existing id. The conflict target
-    /// is `file_path`; sample books (NULL file_path) never conflict.
-    async fn insert(&self, id: &str, book: &Book, mtime: Option<i64>) -> Result<(), sqlx::Error> {
-        let file_path = match &book.source {
-            BookSource::File { path } => Some(path.to_string_lossy().into_owned()),
-            BookSource::Sample => None,
-        };
-        let (cover_zip, cover_type) = cover_columns(book);
-        let lendable = book.lendable as i64;
-        let modified = book.modified.as_ref().map(jiff::Timestamp::to_string);
-        sqlx::query!(
-            "INSERT INTO books (id, file_path, file_mtime, title, author, language,
-                 description, modified, price_usd, lendable,
-                 cover_zip_path, cover_media_type)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(file_path) DO UPDATE SET
-                 file_mtime = excluded.file_mtime,
-                 title = excluded.title,
-                 author = excluded.author,
-                 language = excluded.language,
-                 description = excluded.description,
-                 modified = excluded.modified,
-                 price_usd = excluded.price_usd,
-                 lendable = excluded.lendable,
-                 cover_zip_path = excluded.cover_zip_path,
-                 cover_media_type = excluded.cover_media_type",
-            id,
-            file_path,
-            mtime,
-            book.title,
-            book.author,
-            book.language,
-            book.description,
-            modified,
-            book.price_usd,
-            lendable,
-            cover_zip,
-            cover_type,
+        sqlx::query_scalar!(
+            r#"SELECT path AS "path!" FROM book_files WHERE path LIKE ? LIMIT 1"#,
+            prefix
         )
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
     }
 
-    async fn stored_mtime(&self, path: &Path) -> Option<i64> {
+    async fn stored_file_mtime(&self, path: &Path) -> Option<i64> {
         let path = path.to_string_lossy();
-        sqlx::query_scalar!("SELECT file_mtime FROM books WHERE file_path = ?", path)
+        sqlx::query_scalar!("SELECT file_mtime FROM book_files WHERE path = ?", path)
             .fetch_optional(&self.pool)
             .await
             .ok()
@@ -544,19 +625,26 @@ impl CatalogStore {
             .flatten()
     }
 
-    async fn delete_missing(&self, seen: &HashSet<PathBuf>) {
+    async fn delete_missing_files(&self, seen: &HashSet<PathBuf>) {
         let existing: Vec<String> =
-            sqlx::query_scalar!(r#"SELECT file_path AS "file_path!: String" FROM books WHERE file_path IS NOT NULL"#)
+            sqlx::query_scalar!(r#"SELECT path AS "path!" FROM book_files"#)
                 .fetch_all(&self.pool)
                 .await
                 .unwrap_or_default();
         for path in existing {
             if !seen.contains(Path::new(&path)) {
-                let _ = sqlx::query!("DELETE FROM books WHERE file_path = ?", path)
+                let _ = sqlx::query!("DELETE FROM book_files WHERE path = ?", path)
                     .execute(&self.pool)
                     .await;
             }
         }
+    }
+
+    /// Remove books that have no format files (their formats are all gone).
+    async fn delete_orphan_books(&self) {
+        let _ = sqlx::query!("DELETE FROM books WHERE id NOT IN (SELECT book_id FROM book_files)")
+            .execute(&self.pool)
+            .await;
     }
 
     /// Find an unused id, appending `-2`, `-3`, … to `base` on collision.
@@ -582,18 +670,59 @@ impl CatalogStore {
             .flatten()
             .is_some()
     }
+
+    /// Replace the whole catalog with the built-in sample set (test-only).
+    #[cfg(test)]
+    pub async fn reset_to_samples(&self) {
+        if let Err(err) = sqlx::query!("DELETE FROM books").execute(&self.pool).await {
+            tracing::error!(?err, "failed to clear catalog");
+            return;
+        }
+        for (book, category) in catalog::sample_books() {
+            let modified = book.modified.map(|t| t.to_string());
+            let lendable = book.lendable as i64;
+            let work = catalog::work_key(&book.title, &book.author);
+            if let Err(err) = sqlx::query!(
+                "INSERT INTO books (id, work_key, title, author, language, description,
+                     modified, price_usd, lendable, meta_rank)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                book.id,
+                work,
+                book.title,
+                book.author,
+                book.language,
+                book.description,
+                modified,
+                book.price_usd,
+                lendable,
+            )
+            .execute(&self.pool)
+            .await
+            {
+                tracing::error!(?err, id = %book.id, "failed to seed sample book");
+                continue;
+            }
+            if let Err(err) = self.seed_category(&book.id, &category).await {
+                tracing::error!(?err, id = %book.id, "failed to seed sample category");
+            }
+        }
+    }
 }
 
-fn into_books(rows: Vec<BookRow>) -> Vec<Book> {
-    rows.into_iter().map(BookRow::into_book).collect()
-}
-
-/// The cover columns for a book: `(zip_path, media_type)`.
-fn cover_columns(book: &Book) -> (Option<String>, Option<String>) {
-    match &book.cover {
+/// The cover columns `(zip_path, media_type)` for a format's metadata.
+fn meta_cover_columns(meta: &EpubMeta) -> (Option<String>, Option<String>) {
+    match &meta.cover {
         Some(cover) => (Some(cover.zip_path.clone()), Some(cover.media_type.clone())),
         None => (None, None),
     }
+}
+
+/// A format's `modified` field, normalized to an RFC 3339 string (or `None`).
+fn normalize_modified(meta: &EpubMeta) -> Option<String> {
+    meta.modified
+        .as_deref()
+        .and_then(catalog::parse_timestamp)
+        .map(|t| t.to_string())
 }
 
 /// A file's modification time as Unix seconds.

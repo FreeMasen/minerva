@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, file_path, title, author, language, description, modified,\n                    price_usd, lendable, cover_zip_path, cover_media_type\n             FROM books ORDER BY title COLLATE NOCASE LIMIT ? OFFSET ?",
+  "query": "SELECT id, title, author, language, description, modified,\n                    price_usd, lendable, cover_zip_path, cover_media_type\n             FROM books ORDER BY title COLLATE NOCASE LIMIT ? OFFSET ?",
   "describe": {
     "columns": [
       {
@@ -9,53 +9,48 @@
         "type_info": "Text"
       },
       {
-        "name": "file_path",
+        "name": "title",
         "ordinal": 1,
         "type_info": "Text"
       },
       {
-        "name": "title",
+        "name": "author",
         "ordinal": 2,
         "type_info": "Text"
       },
       {
-        "name": "author",
+        "name": "language",
         "ordinal": 3,
         "type_info": "Text"
       },
       {
-        "name": "language",
+        "name": "description",
         "ordinal": 4,
         "type_info": "Text"
       },
       {
-        "name": "description",
+        "name": "modified",
         "ordinal": 5,
         "type_info": "Text"
       },
       {
-        "name": "modified",
-        "ordinal": 6,
-        "type_info": "Text"
-      },
-      {
         "name": "price_usd",
-        "ordinal": 7,
+        "ordinal": 6,
         "type_info": "Float"
       },
       {
         "name": "lendable",
-        "ordinal": 8,
+        "ordinal": 7,
         "type_info": "Integer"
       },
       {
         "name": "cover_zip_path",
-        "ordinal": 9,
+        "ordinal": 8,
         "type_info": "Text"
       },
       {
         "name": "cover_media_type",
-        "ordinal": 10,
+        "ordinal": 9,
         "type_info": "Text"
       }
     ],
@@ -64,7 +59,6 @@
     },
     "nullable": [
       false,
-      true,
       false,
       false,
       true,
@@ -76,5 +70,5 @@
       true
     ]
   },
-  "hash": "8ba5161b6e64f402c9b2c5bccb305755d047d45f4b142c7d26d143e9f617019a"
+  "hash": "a4e1254f6cde73a835ca7d8c5214f6c929c831ba5151b06962d4b2d157587693"
 }

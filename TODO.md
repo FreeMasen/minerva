@@ -5,6 +5,13 @@
   revisit if a specific path is profiled)
 ## Done (recent batch)
 
+- **Multi-format books (XTC/XTCH)** — a book is a logical work (`books`, grouped
+  by `work_key` = title + author) backed by one or more format files
+  (`book_files`). Scanning reads `.epub`/`.xtc`/`.xtch`; files matching on
+  title+author merge into one publication with one `open-access` link per format
+  (`/opds/download/{id}/{format}`), and the richest format (`meta_rank`) supplies
+  the shared metadata. (`src/xtc.rs`, `migrations/0003_book_files.sql`)
+
 - **Demo scaffolding is test-only** — EPUB generation (`assets`) and the sample
   catalog (`sample_books`/`reset_to_samples`) compile for tests only. Runtime
   cover generation moved to `src/covers.rs`. A library directory

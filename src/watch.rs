@@ -19,7 +19,7 @@ use notify::{EventKind, RecursiveMode, Watcher};
 use notify_debouncer_full::{DebounceEventResult, DebouncedEvent, new_debouncer};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
-use crate::catalog::{self, book_from_file};
+use crate::catalog;
 use crate::library::CatalogStore;
 
 /// Start watching `dir`, updating `store` as EPUBs are added, changed or
@@ -88,7 +88,7 @@ async fn apply_batch(dir: &Path, store: &CatalogStore, events: Vec<DebouncedEven
             EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
         );
         for path in &event.paths {
-            if catalog::is_epub(path) {
+            if catalog::is_book_file(path) {
                 affected.insert(path.clone());
             } else if structural
                 && (path.is_dir() || (!path.exists() && store.has_books_under(path).await))
@@ -97,7 +97,7 @@ async fn apply_batch(dir: &Path, store: &CatalogStore, events: Vec<DebouncedEven
                 // held books was removed.
                 full_reconcile = true;
             }
-            // Otherwise a non-EPUB file, or a directory merely modified: ignore.
+            // Otherwise a non-book file, or a directory merely modified: ignore.
         }
     }
 
@@ -112,30 +112,11 @@ async fn apply_batch(dir: &Path, store: &CatalogStore, events: Vec<DebouncedEven
 
     for path in affected {
         if path.is_file() {
-            match crate::epub::read_meta(&path) {
-                Ok(meta) => {
-                    let mtime = file_mtime(&path);
-                    let (book, category) = book_from_file(dir, path, meta);
-                    store.upsert_file(&book, mtime, &category).await;
-                }
-                Err(err) => {
-                    tracing::warn!(?err, path = %path.display(), "dropping unreadable EPUB");
-                    store.delete_by_path(&path).await;
-                }
-            }
+            store.ingest(dir, &path).await;
         } else {
             store.delete_by_path(&path).await;
         }
     }
 
     true
-}
-
-/// A file's modification time as Unix seconds.
-fn file_mtime(path: &Path) -> Option<i64> {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
 }

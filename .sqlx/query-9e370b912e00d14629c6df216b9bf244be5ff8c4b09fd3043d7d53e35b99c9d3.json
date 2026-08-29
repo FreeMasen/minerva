@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO book_files (path, book_id, media_type, file_mtime)\n                 VALUES (?, ?, ?, ?)\n             ON CONFLICT(path) DO UPDATE SET\n                 book_id = excluded.book_id,\n                 media_type = excluded.media_type,\n                 file_mtime = excluded.file_mtime",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "9e370b912e00d14629c6df216b9bf244be5ff8c4b09fd3043d7d53e35b99c9d3"
+}

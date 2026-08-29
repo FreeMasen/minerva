@@ -1,70 +1,64 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, file_path, title, author, language, description, modified,\n                    price_usd, lendable, cover_zip_path, cover_media_type\n             FROM books ORDER BY title COLLATE NOCASE",
+  "query": "SELECT b.id AS \"id!\", b.title AS \"title!\", b.author AS \"author!\",\n                      b.language, b.description, b.modified, b.price_usd,\n                      b.lendable AS \"lendable!\", b.cover_zip_path, b.cover_media_type\n               FROM books b\n               JOIN book_categories bc ON bc.book_id = b.id\n               WHERE bc.category_slug = ?\n               ORDER BY b.title COLLATE NOCASE",
   "describe": {
     "columns": [
       {
-        "name": "id",
+        "name": "id!",
         "ordinal": 0,
         "type_info": "Text"
       },
       {
-        "name": "file_path",
+        "name": "title!",
         "ordinal": 1,
         "type_info": "Text"
       },
       {
-        "name": "title",
+        "name": "author!",
         "ordinal": 2,
         "type_info": "Text"
       },
       {
-        "name": "author",
+        "name": "language",
         "ordinal": 3,
         "type_info": "Text"
       },
       {
-        "name": "language",
+        "name": "description",
         "ordinal": 4,
         "type_info": "Text"
       },
       {
-        "name": "description",
+        "name": "modified",
         "ordinal": 5,
         "type_info": "Text"
       },
       {
-        "name": "modified",
-        "ordinal": 6,
-        "type_info": "Text"
-      },
-      {
         "name": "price_usd",
-        "ordinal": 7,
+        "ordinal": 6,
         "type_info": "Float"
       },
       {
-        "name": "lendable",
-        "ordinal": 8,
+        "name": "lendable!",
+        "ordinal": 7,
         "type_info": "Integer"
       },
       {
         "name": "cover_zip_path",
-        "ordinal": 9,
+        "ordinal": 8,
         "type_info": "Text"
       },
       {
         "name": "cover_media_type",
-        "ordinal": 10,
+        "ordinal": 9,
         "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 0
+      "Right": 1
     },
     "nullable": [
       false,
-      true,
       false,
       false,
       true,
@@ -76,5 +70,5 @@
       true
     ]
   },
-  "hash": "3babea30d7b8d7dac3c0b808980d082ad4e34173eeb1d30802fd7752f28a723c"
+  "hash": "4e46cdc4029931d3ad0e706558a67a1cf06c3c6d4f6fa9eb8cd5e2fe3c7192ab"
 }

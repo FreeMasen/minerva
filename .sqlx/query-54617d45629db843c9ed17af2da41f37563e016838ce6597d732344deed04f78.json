@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT path AS \"path!\", media_type AS \"media_type!\"\n               FROM book_files WHERE book_id = ? ORDER BY media_type",
+  "describe": {
+    "columns": [
+      {
+        "name": "path!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "media_type!",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "54617d45629db843c9ed17af2da41f37563e016838ce6597d732344deed04f78"
+}

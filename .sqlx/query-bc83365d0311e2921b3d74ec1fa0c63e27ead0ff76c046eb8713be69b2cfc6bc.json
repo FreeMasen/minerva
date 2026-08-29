@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM books WHERE id NOT IN (SELECT book_id FROM book_files)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "bc83365d0311e2921b3d74ec1fa0c63e27ead0ff76c046eb8713be69b2cfc6bc"
+}

@@ -1,20 +1,20 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id FROM books WHERE file_path = ?",
+  "query": "SELECT path AS \"path!\" FROM book_files",
   "describe": {
     "columns": [
       {
-        "name": "id",
+        "name": "path!",
         "ordinal": 0,
         "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 0
     },
     "nullable": [
       false
     ]
   },
-  "hash": "5c9cbedeaf6620b598be57ead28a0a2c8fab2aa270f0c7da087aa9e69f02a8ed"
+  "hash": "0d7d523ea768acf5a729c67b6967474d306dc3bd262913753b08458af5b5d655"
 }

@@ -38,14 +38,18 @@ The catalog lives in a SQLite `books` table (`OPDS_DB`) and is queried per
 request rather than held in memory.
 
 `OPDS_LIBRARY_DIR` is required. On startup the server reconciles the store
-against it — scanning `*.epub` files recursively and recording each file's
-embedded metadata (title, author, language, description, subjects) and cover.
+against it — scanning book files (`*.epub`, `*.xtc`, `*.xtch`) recursively and
+recording each file's metadata (title, author, language, description, subjects)
+and cover. A book is a logical work that can have **several format files**:
+files sharing a title + author group into one publication with one download link
+per format, and the richest format (EPUB over XTC) supplies the shared metadata.
 Unchanged files (matching a stored modification time) are skipped on restart, so
 startup is cheap for large, mostly-static libraries. The directory is
-**watched**: adding an EPUB inserts a row and removing one deletes it — no
-restart required. Downloads stream the real file bytes and cover requests serve
-the image embedded in the EPUB (falling back to a generated SVG when a book has
-no cover).
+**watched**: adding a book file inserts/attaches a format and removing one
+detaches it (deleting the book once its last format is gone) — no restart
+required. Downloads stream the real file bytes and cover requests serve the
+image embedded in the EPUB (XTC covers use a bespoke page codec and are not
+extractable, so those fall back to a generated SVG).
 
 (The built-in sample catalog and its generated EPUBs are test-only scaffolding
 and are not compiled into the server.)
@@ -63,7 +67,8 @@ and are not compiled into the server.)
 | `POST /opds/publications/{id}/categories` | Assign a category: `{"name": "Sci-Fi"}` (created on demand). |
 | `DELETE /opds/publications/{id}/categories/{slug}` | Remove a category from a publication. |
 | `GET /opds/search?query=...`   | Search feed; also accepts `author=` and `title=` field filters. |
-| `GET /opds/download/{id}.epub` | Open-access download: a generated minimal EPUB 3.       |
+| `GET /opds/download/{id}/{format}` | Open-access download of one format (`epub`/`xtc`/`xtch`), streamed from disk. |
+| `GET /opds/download/{id}.epub` | Open-access download of a sample book: a generated minimal EPUB 3. |
 | `GET /opds/buy/{id}`           | Advertised for spec completeness; returns 501 (no store).|
 | `GET /opds/borrow/{id}`        | Advertised for lendable titles; returns 501 (no lending).|
 | `GET /opds/covers/{id}.svg`    | Generated SVG cover (`{id}-thumb.svg` for the thumbnail).|
@@ -81,13 +86,14 @@ and are not compiled into the server.)
   subject heuristic), and they can be assigned/removed at runtime via the
   publication category endpoints. The facet, browse group, and
   `/opds/category/{slug}` feed are all driven from the table.
-- A filesystem-backed catalog (`OPDS_LIBRARY_DIR`) that scans EPUB files for
-  metadata and covers and live-reloads on additions/removals.
-- Acquisition links: free `open-access` downloads, paid `buy` links (with a
-  `price` and an `indirectAcquisition`), and library `borrow` links carrying
-  lending `availability`/`copies`/`holds` (an OPDS extension). Downloads stream
-  real EPUB bytes (or a generated minimal EPUB 3 for samples); buy and borrow
-  are advertised but report 501.
+- A filesystem-backed catalog (`OPDS_LIBRARY_DIR`) that scans EPUB and XTC/XTCH
+  files for metadata and covers and live-reloads on additions/removals, grouping
+  multiple formats of the same work into one publication.
+- Acquisition links: one free `open-access` download per available format, paid
+  `buy` links (with a `price` and an `indirectAcquisition`), and library
+  `borrow` links carrying lending `availability`/`copies`/`holds` (an OPDS
+  extension). Downloads stream the real file bytes (or a generated minimal
+  EPUB 3 for samples); buy and borrow are advertised but report 501.
 - Cover `images` (full-size + thumbnail), served from the EPUB's embedded cover
   (thumbnails are downscaled to fit 160x240 and re-encoded as JPEG) or as a
   generated SVG placeholder.
@@ -163,9 +169,11 @@ database lives in `/var/lib/opds-axum`.
 
 - `src/model.rs` — serde types for the OPDS 2.0 wire format.
 - `src/catalog.rs` — the `Book`/`Category` domain types, the sample set, and
-  EPUB scanning helpers.
-- `src/library.rs` — the SQLite-backed catalog store (queries + reconciliation).
+  library scanning helpers (per-format media types, work grouping).
+- `src/library.rs` — the SQLite-backed catalog store (queries + reconciliation),
+  including the `book_files` format table.
 - `src/db.rs` — the sqlx connection pool + migrations.
+- `src/xtc.rs` — reads metadata out of XTC/XTCH files.
 - `migrations/` — SQL schema migrations (applied at startup).
 - `src/epub.rs` — reads metadata and cover images out of EPUB files.
 - `src/covers.rs` — placeholder SVG covers and JPEG thumbnail generation.

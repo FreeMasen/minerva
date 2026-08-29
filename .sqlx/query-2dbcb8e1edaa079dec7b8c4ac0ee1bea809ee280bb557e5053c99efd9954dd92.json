@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT file_mtime FROM books WHERE file_path = ?",
+  "query": "SELECT file_mtime FROM book_files WHERE path = ?",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       true
     ]
   },
-  "hash": "fb21bcd4be4b110dd6c1bfd5811a23cab3815be27bd6d78bdb24aaba952f431d"
+  "hash": "2dbcb8e1edaa079dec7b8c4ac0ee1bea809ee280bb557e5053c99efd9954dd92"
 }
