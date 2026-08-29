@@ -216,10 +216,15 @@ pub(crate) fn parse_timestamp(s: &str) -> Option<jiff::Timestamp> {
 }
 
 /// Turn arbitrary text into a URL-safe, lowercase, hyphenated slug.
+///
+/// Non-ASCII letters are transliterated to ASCII first (e.g. `République` ->
+/// `republique`, `Œuvres` -> `oeuvres`) so accented titles produce readable
+/// slugs instead of dropping the accented characters to hyphens.
 pub(crate) fn slugify(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
+    let ascii = deunicode::deunicode(input);
+    let mut out = String::with_capacity(ascii.len());
     let mut pending_dash = false;
-    for ch in input.chars() {
+    for ch in ascii.chars() {
         if ch.is_ascii_alphanumeric() {
             if pending_dash && !out.is_empty() {
                 out.push('-');
@@ -458,4 +463,21 @@ pub(crate) fn sample_books() -> Vec<(Book, Category)> {
             Acquisition::Borrow, // demonstrates library lending
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::slugify;
+
+    #[test]
+    fn slugify_transliterates_accents() {
+        assert_eq!(slugify("Baking at République"), "baking-at-republique");
+        assert_eq!(slugify("Naïve Café"), "naive-cafe");
+        assert_eq!(slugify("Œuvres complètes"), "oeuvres-completes");
+        // Plain ASCII is unchanged; runs of punctuation collapse to one dash.
+        assert_eq!(slugify("Moby-Dick; or, The Whale"), "moby-dick-or-the-whale");
+        // Empty/blank input still yields a usable slug.
+        assert_eq!(slugify(""), "book");
+        assert_eq!(slugify("   "), "book");
+    }
 }
