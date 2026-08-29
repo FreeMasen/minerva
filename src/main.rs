@@ -5,9 +5,9 @@
 //! feeds (all publications and per-category), facets, full-text search via a
 //! templated link, and individual publication documents.
 //!
-//! The catalog is either the built-in sample set or a directory of EPUB files
-//! (set `OPDS_LIBRARY_DIR`) that is scanned for metadata and covers and kept in
-//! sync as files are added or removed.
+//! The catalog is a directory of EPUB files (`OPDS_LIBRARY_DIR`, required),
+//! scanned for metadata and covers and kept in sync as files are added or
+//! removed.
 
 /// The HTTP Basic realm advertised to clients.
 const AUTH_REALM: &str = "OPDS catalog";
@@ -16,14 +16,18 @@ const AUTH_REALM: &str = "OPDS catalog";
 const PAGE_SIZE: u64 = 3;
 
 mod admin;
-mod assets;
 mod auth;
 mod catalog;
+mod covers;
 mod db;
 mod epub;
 mod library;
 mod model;
 mod watch;
+
+// EPUB generation is demo/test scaffolding (see the module docs).
+#[cfg(test)]
+mod assets;
 
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
@@ -42,7 +46,7 @@ use clap::{Parser, Subcommand};
 use serde::Deserialize;
 
 use crate::auth::AuthStore;
-use crate::catalog::BookSource;
+use crate::catalog::{Book, BookSource};
 use crate::library::CatalogStore;
 use crate::model::*;
 
@@ -58,7 +62,7 @@ struct Cli {
     #[arg(long, short, env = "OPDS_DB", default_value = "opds.db", global = true)]
     db: PathBuf,
 
-    /// Directory of EPUB files to serve instead of the built-in samples.
+    /// Directory of EPUB files to serve (required to run the server).
     #[arg(long, short, env = "OPDS_LIBRARY_DIR")]
     library_dir: Option<PathBuf>,
 
@@ -178,19 +182,14 @@ async fn run_server(cli: Cli) -> anyhow::Result<()> {
         .with_context(|| format!("opening database {}", cli.db.display()))?;
     let catalog = Arc::new(CatalogStore::new(pool.clone()));
 
-    // A library directory reconciles the catalog against a directory of EPUBs;
-    // otherwise we serve the built-in sample set.
-    let library_dir = cli.library_dir.filter(|p| !p.as_os_str().is_empty());
-    match &library_dir {
-        Some(dir) => {
-            catalog.remove_sample_books().await;
-            catalog.reconcile_dir(dir).await;
-        }
-        None => {
-            tracing::info!("no library directory; serving the built-in sample catalog");
-            catalog.reset_to_samples().await;
-        }
-    }
+    // A library directory is required: the catalog is reconciled against its
+    // EPUB files (the built-in sample catalog is test-only scaffolding).
+    let library_dir = cli
+        .library_dir
+        .filter(|p| !p.as_os_str().is_empty())
+        .context("a library directory is required: set OPDS_LIBRARY_DIR or --library-dir")?;
+    catalog.remove_sample_books().await;
+    catalog.reconcile_dir(&library_dir).await;
 
     // HTTP Basic auth is enforced whenever the user table is non-empty: create
     // an account with `adduser` to lock the catalog, and it's open otherwise.
@@ -203,17 +202,15 @@ async fn run_server(cli: Cli) -> anyhow::Result<()> {
     };
 
     // Reflect additions/removals in the library directory as they happen.
-    if let Some(dir) = &library_dir {
-        if let Err(err) = watch::spawn(dir.clone(), catalog.clone()) {
-            tracing::warn!(?err, "failed to start the library watcher");
-        }
+    if let Err(err) = watch::spawn(library_dir.clone(), catalog.clone()) {
+        tracing::warn!(?err, "failed to start the library watcher");
     }
 
     let state = Arc::new(AppState {
         base_url: cli.base_url,
         catalog,
         auth,
-        library_dir,
+        library_dir: Some(library_dir),
     });
 
     let addr = "0.0.0.0:3000";
@@ -723,12 +720,7 @@ async fn download(State(state): State<Arc<AppState>>, Path(file): Path<String>) 
     };
 
     match &book.source {
-        BookSource::Sample => {
-            if !book.is_open_access() {
-                return not_found("This publication is not available for open-access download");
-            }
-            epub_response(&format!("{id}.epub"), assets::epub_bytes(&book))
-        }
+        BookSource::Sample => sample_download(&book, &id),
         BookSource::File { path } => {
             let filename = path
                 .file_name()
@@ -745,6 +737,21 @@ async fn download(State(state): State<Arc<AppState>>, Path(file): Path<String>) 
             }
         }
     }
+}
+
+/// Serve a synthetic sample book's generated EPUB. Sample books only exist in
+/// the test/demo catalog, so production never reaches this.
+#[cfg(test)]
+fn sample_download(book: &Book, id: &str) -> Response {
+    if !book.is_open_access() {
+        return not_found("This publication is not available for open-access download");
+    }
+    epub_response(&format!("{id}.epub"), assets::epub_bytes(book))
+}
+
+#[cfg(not(test))]
+fn sample_download(_book: &Book, _id: &str) -> Response {
+    not_found("No such publication")
 }
 
 /// Build an EPUB download response with an attachment filename.
@@ -821,7 +828,7 @@ async fn serve_cover(state: Arc<AppState>, id: String, thumbnail: bool) -> Respo
         let read = tokio::task::spawn_blocking(move || {
             let bytes = epub::read_entry(&path, &zip_path)?;
             if thumbnail {
-                if let Some(thumb) = assets::thumbnail(&bytes, 160, 240) {
+                if let Some(thumb) = covers::thumbnail(&bytes, 160, 240) {
                     return Ok((thumb, "image/jpeg".to_string()));
                 }
             }
@@ -843,7 +850,7 @@ async fn serve_cover(state: Arc<AppState>, id: String, thumbnail: bool) -> Respo
     }
 
     let (width, height) = if thumbnail { (160, 240) } else { (800, 1200) };
-    let svg = assets::cover_svg(&book, width, height);
+    let svg = covers::cover_svg(&book, width, height);
     ([(header::CONTENT_TYPE, "image/svg+xml")], svg).into_response()
 }
 
@@ -1375,14 +1382,14 @@ mod tests {
             .write_to(&mut png, image::ImageFormat::Png)
             .unwrap();
 
-        let thumb = assets::thumbnail(png.get_ref(), 160, 240).expect("a thumbnail");
+        let thumb = covers::thumbnail(png.get_ref(), 160, 240).expect("a thumbnail");
         // Valid JPEG, downscaled, aspect ratio preserved.
         assert_eq!(&thumb[..3], b"\xff\xd8\xff");
         let decoded = image::load_from_memory(&thumb).expect("decodable");
         assert_eq!((decoded.width(), decoded.height()), (160, 240));
 
         // Non-image bytes yield no thumbnail (caller falls back).
-        assert!(assets::thumbnail(b"not an image", 160, 240).is_none());
+        assert!(covers::thumbnail(b"not an image", 160, 240).is_none());
     }
 
     #[tokio::test]

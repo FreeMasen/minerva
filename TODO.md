@@ -3,16 +3,12 @@
 - make a pass at reducing allocation, especially for duplicated string allocations
   (assessed: no significant duplicated-allocation hotspot for this workload;
   revisit if a specific path is profiled)
-- move assets.rs and sample_books to be exclusively available for tests
-  (NEEDS A DECISION — conflicts with runtime: `assets::cover_svg` (placeholder
-  covers) and `assets::thumbnail` (cover resizing) are used serving real books,
-  and `sample_books` backs the default no-library catalog. Gating the whole of
-  assets/samples behind cfg(test) would break cover serving and empty the
-  default catalog. Options: (a) gate only `sample_books` + `epub_bytes` (the
-  demo-only parts) and drop the built-in sample catalog so a library dir is
-  required; (b) leave as-is. Which?)
-
 ## Done (recent batch)
+
+- **Demo scaffolding is test-only** — EPUB generation (`assets`) and the sample
+  catalog (`sample_books`/`reset_to_samples`) compile for tests only. Runtime
+  cover generation moved to `src/covers.rs`. A library directory
+  (`OPDS_LIBRARY_DIR`) is now required to run the server.
 
 - **walkdir** — `catalog::epub_paths` uses walkdir instead of a hand-rolled walk.
 - **jiff timestamps** — `Book::modified` is a `jiff::Timestamp`, parsed/formatted

@@ -184,6 +184,7 @@ pub(crate) fn slugify(input: &str) -> String {
 
 impl Book {
     /// A freely downloadable title: neither for sale nor lent.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_open_access(&self) -> bool {
         self.price_usd.is_none() && !self.lendable
     }
@@ -275,8 +276,9 @@ impl Book {
     }
 }
 
-/// The built-in sample set (with each book's default category), used when no
-/// library directory is configured.
+/// The built-in sample set (with each book's default category). Demo/test
+/// scaffolding: a real deployment always serves a library directory.
+#[cfg(test)]
 pub(crate) fn sample_books() -> Vec<(Book, Category)> {
     let book = |id: &str,
                 title: &str,

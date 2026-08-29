@@ -352,7 +352,8 @@ impl CatalogStore {
 
     // --- Mutations used at startup and by the watcher ---
 
-    /// Replace the whole catalog with the built-in sample set.
+    /// Replace the whole catalog with the built-in sample set (test-only).
+    #[cfg(test)]
     pub async fn reset_to_samples(&self) {
         if let Err(err) = sqlx::query!("DELETE FROM books").execute(&self.pool).await {
             tracing::error!(?err, "failed to clear catalog");

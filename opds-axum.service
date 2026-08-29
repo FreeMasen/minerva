@@ -22,12 +22,11 @@ Type=exec
 ExecStart=/usr/local/bin/opds-axum
 
 # --- Configuration ---------------------------------------------------------
-# The catalog + user database lives in the state directory below. Point
-# OPDS_LIBRARY_DIR at a directory of EPUBs to serve a real library (otherwise
-# the built-in samples are served). Override any of these in the env file.
+# OPDS_LIBRARY_DIR (a directory of EPUB files) is required — set it here or in
+# the env file. The catalog + user database lives in the state directory below.
+Environment=OPDS_LIBRARY_DIR=/srv/books
 Environment=OPDS_DB=/var/lib/opds-axum/opds.db
 Environment=OPDS_BASE_URL=http://localhost:3000
-#Environment=OPDS_LIBRARY_DIR=/srv/books
 Environment=RUST_LOG=opds_axum=info,tower_http=info,warn
 EnvironmentFile=-/etc/opds-axum/opds-axum.env
 
@@ -52,7 +51,9 @@ AmbientCapabilities=
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/lib/opds-axum
+# The state dir (database) is writable; add the library dir too if you want
+# admin uploads to work (it must match OPDS_LIBRARY_DIR).
+ReadWritePaths=/var/lib/opds-axum /srv/books
 PrivateTmp=true
 PrivateDevices=true
 ProtectClock=true

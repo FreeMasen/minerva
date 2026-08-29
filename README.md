@@ -12,16 +12,14 @@ JSON *collection* made of `metadata`, `links`, and sub-collections
 ## Running
 
 ```sh
-cargo run
-# the catalog is stored in SQLite (default ./opds.db); override the location
-OPDS_DB=/var/lib/opds/catalog.db cargo run
-# override the base URL used to build absolute hrefs (default http://localhost:3000)
-OPDS_BASE_URL=https://books.example.com cargo run
-# serve a real library: scan a directory of EPUB files instead of the samples
+# a library directory of EPUBs is required
 OPDS_LIBRARY_DIR=/path/to/epubs cargo run
+# the catalog + accounts are stored in SQLite (default ./opds.db)
+OPDS_LIBRARY_DIR=/path/to/epubs OPDS_DB=/var/lib/opds/catalog.db cargo run
+# override the base URL used to build absolute hrefs (default http://localhost:3000)
+OPDS_LIBRARY_DIR=/path/to/epubs OPDS_BASE_URL=https://books.example.com cargo run
 # add an account (stored in the same OPDS_DB); the catalog then requires login
 cargo run adduser alice        # prompts for a password (hidden, confirmed)
-cargo run                      # HTTP Basic auth is enforced while any account exists
 ```
 
 Each of these environment variables is also a command-line flag (`--base-url`,
@@ -39,10 +37,7 @@ account exists, and the catalog is open otherwise.
 The catalog lives in a SQLite `books` table (`OPDS_DB`) and is queried per
 request rather than held in memory.
 
-With no `OPDS_LIBRARY_DIR`, the store is (re)seeded with a built-in sample
-catalog of public-domain titles (with generated EPUBs and SVG covers).
-
-When `OPDS_LIBRARY_DIR` points at a directory, the server reconciles the store
+`OPDS_LIBRARY_DIR` is required. On startup the server reconciles the store
 against it — scanning `*.epub` files recursively and recording each file's
 embedded metadata (title, author, language, description, subjects) and cover.
 Unchanged files (matching a stored modification time) are skipped on restart, so
@@ -51,6 +46,9 @@ startup is cheap for large, mostly-static libraries. The directory is
 restart required. Downloads stream the real file bytes and cover requests serve
 the image embedded in the EPUB (falling back to a generated SVG when a book has
 no cover).
+
+(The built-in sample catalog and its generated EPUBs are test-only scaffolding
+and are not compiled into the server.)
 
 ## Endpoints
 
@@ -84,8 +82,7 @@ no cover).
   publication category endpoints. The facet, browse group, and
   `/opds/category/{slug}` feed are all driven from the table.
 - A filesystem-backed catalog (`OPDS_LIBRARY_DIR`) that scans EPUB files for
-  metadata and covers and live-reloads on additions/removals, alongside the
-  built-in sample catalog.
+  metadata and covers and live-reloads on additions/removals.
 - Acquisition links: free `open-access` downloads, paid `buy` links (with a
   `price` and an `indirectAcquisition`), and library `borrow` links carrying
   lending `availability`/`copies`/`holds` (an OPDS extension). Downloads stream
@@ -171,9 +168,9 @@ database lives in `/var/lib/opds-axum`.
 - `src/db.rs` — the sqlx connection pool + migrations.
 - `migrations/` — SQL schema migrations (applied at startup).
 - `src/epub.rs` — reads metadata and cover images out of EPUB files.
-- `src/assets.rs` — on-the-fly EPUB and SVG cover generation (for samples and
-  cover fallbacks).
+- `src/covers.rs` — placeholder SVG covers and JPEG thumbnail generation.
+- `src/assets.rs` — EPUB generation (test/demo scaffolding; compiled for tests only).
 - `src/watch.rs` — watches the library directory and updates the catalog store.
-- `src/base64.rs` — minimal Base64 for HTTP Basic credentials.
 - `src/auth.rs` — the SQLite-backed user store and Argon2 password hashing.
+- `src/admin.rs` — the tera-templated web management UI.
 - `src/main.rs` — the Axum router, handlers, auth middleware, and response wrapper.
