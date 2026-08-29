@@ -1,5 +1,87 @@
 # Plan / deferred work
 
+## IN PROGRESS — "stringly-typed -> richer types" refactor (RESUME HERE)
+
+Converting stringly-typed values into domain types. Four pieces were approved
+(all of them). DB migrations are fine — nothing is deployed. Last clean commit
+is `d95f04a` (the Cow refactor); everything below is uncommitted work on top.
+
+Money decision: use a `UsdCents(u32)` newtype, NOT the `doubloon` crate.
+doubloon is built on `rust_decimal` (no clean SQLite mapping — SQLite has no
+decimal type) and its serde emits the amount as a *string*, whereas the OPDS
+wire wants `price.value` as a JSON *number*. Prices here are near-vestigial
+(buy returns 501). Store integer cents in the DB (`INTEGER`), compute the wire
+value as `cents as f64 / 100.0`. (If we ever want real multi-currency, revisit
+doubloon and persist minor units.)
+
+### 1. `AvailabilityState` enum — DONE (code), not committed
+- `src/model.rs`: added `enum AvailabilityState { Available, Unavailable,
+  Reserved, Ready }` (`#[serde(rename_all = "lowercase")]`); `Availability.state`
+  is now that enum instead of `Cow<'static, str>`.
+- `src/catalog.rs`: `state: AvailabilityState::Available`.
+- Built + `lendable` test green.
+
+### 2. `Format` enum — IN PROGRESS
+Goal: one `enum Format { Epub, Xtc, Xtch }` replacing the 4 string helpers and
+`BookFile.media_type: String` -> `BookFile.format: Format`. DB `book_files.media_type`
+column is UNCHANGED (still stores the media-type string); `Format::from_media_type`
+parses it on read, `format.media_type()` writes it. No migration, no `.sqlx` change.
+- DONE `src/catalog.rs`: `Format` enum with `from_path`/`from_media_type`/
+  `media_type()`/`ext()`/`rank()`/`read_meta()`; `BookFile { path, format }`;
+  removed `media_type_for`/`format_rank`/`format_ext`/`read_meta` free fns;
+  `is_book_file` now uses `Format::from_path`; `to_publication` loop uses
+  `file.format.ext()` / `file.format.media_type()`.
+- DONE `src/library.rs`: import `Format`; `files_for` uses `filter_map` +
+  `Format::from_media_type` (warn+skip on unknown); `reconcile_dir` and `ingest`
+  compute `Format::from_path` and call `format.read_meta`; `ingest_file` now
+  takes a `format: Format` arg and uses `format.media_type()` / `format.rank()`.
+- TODO `src/main.rs` (the ONLY remaining edits to make Format compile):
+  - `download_format` (~line 740): `catalog::format_ext(&f.media_type) == format`
+    -> `f.format.ext() == format`.
+  - (~line 751): `let media_type = file.media_type.clone();` ->
+    `let media_type = file.format.media_type();` (now `&'static str`; drop `.clone()`,
+    `file_response` takes `&str`).
+  - `serve_cover` (~line 849): `.find(|f| f.media_type == "application/epub+zip")`
+    -> `.find(|f| f.format == catalog::Format::Epub)`.
+  - test `epub_and_xtc_of_same_work_group_into_one_book` (~line 1491):
+    `files.iter().map(|f| f.media_type.clone())` -> `.map(|f| f.format.media_type())`
+    collecting `Vec<&str>`; the two `media_types.contains(&"...".to_string())`
+    asserts become `.contains(&"application/epub+zip")` etc.
+- THEN: `cargo build` + `cargo test` (DATABASE_URL=sqlite:dev.db), commit.
+
+### 3. Money (`UsdCents`) + `Acquisition` enum — NOT STARTED
+Replace `Book.price_usd: Option<f64>` + `Book.lendable: bool` (an implicit
+tri-state with the impossible `lendable && priced` combo) with:
+- `struct UsdCents(u32)` (probably in `catalog.rs` or a small `money.rs`).
+- `enum Acquisition { OpenAccess, Buy(UsdCents), Borrow }` on `Book`.
+Work:
+- `src/catalog.rs`: add the types; `Book` drops `price_usd`/`lendable`, gains
+  `acquisition: Acquisition`. `to_publication`'s borrow/buy/open-access `match`
+  keys off `self.acquisition` instead of `if lendable / else if price`. Wire
+  `Price { value: cents.0 as f64 / 100.0, .. }`.
+- New migration `0004_*.sql`: `books.price_usd REAL` -> integer cents. Simplest:
+  add `price_cents INTEGER`, backfill `CAST(ROUND(price_usd*100) AS INTEGER)`,
+  keep `lendable`. (Acquisition is derived at read time from `price_cents` +
+  `lendable`: Some(cents)->Buy, lendable->Borrow, else OpenAccess.) Or add an
+  explicit `acquisition` tag column — derived is less churn.
+- `src/library.rs`: `BookRow` reads `price_cents`/`lendable` and builds
+  `Acquisition`; `create_book`/`write_metadata`/`reset_to_samples` and the many
+  column lists (`BOOK_COLUMNS` etc.) updated. Regenerate `.sqlx`
+  (`cargo sqlx prepare`, DATABASE_URL=sqlite:dev.db).
+- `src/main.rs`: admin/CLI paths that set price/lendable; sample data.
+- Tests: `paid_publication_has_indirect_acquisition`,
+  `lendable_publication_has_borrow_with_availability` reference price/lendable.
+
+### 4. ID newtypes (`BookId`, `CategorySlug`) — NOT STARTED
+Wrap the slug strings for type safety. NOT uuid/int — the ids are human-readable
+URL slugs (`/opds/publications/moby-dick`) derived from titles; keep that.
+- `struct BookId(String)` / `struct CategorySlug(String)` (Deserialize for axum
+  `Path` extractors; `Display`/`AsRef<str>`; sqlx `Type`/encode as text).
+- Thread through `Book.id`, `Category.slug`, `CatalogStore` method signatures,
+  and the axum handlers. Biggest surface area — do it LAST, one module at a time,
+  building between each.
+- Regenerate `.sqlx` if any query bindings change types.
+
 ## Done (recent batch)
 
 - **Fewer allocations building the wire model** — the constant-bearing link/
