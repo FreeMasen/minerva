@@ -1,3 +1,22 @@
+- [x] admin page still has old name — now "minerva"
+- [x] admin page reloads w/o scroll position on category add — mutations are now
+      fetch()-based AJAX; the page updates in place, no reload
+- [x] categories should be case insensitive — already were (slugify lowercases,
+      categories.slug is the PK so "Fiction"/"fiction" collapse); add_category now
+      returns the canonical category as JSON so the chip's slug matches the server
+- [x] admin page should link to book downloads — new Download column
+- [~] lots of my books are missing authors — added a fallback to the creator
+      `opf:file-as` attribute for EPUBs that leave <dc:creator> empty. NEEDS A
+      SAMPLE from the real library to confirm the actual cause (could also be
+      XTC files with no embedded author, which can't be recovered).
+- [x] book slugs replace accented letters with `-` — slugify now transliterates
+      via deunicode ("République" -> "republique")
+- [x] A way to note what number in a series of a book would be good — series +
+      series_index parsed from EPUB (Calibre + EPUB3), stored, on the wire
+      (belongsTo.series), and editable in admin
+
+Only ID newtypes (refactor #4 below) remains.
+
 # Plan / deferred work
 
 ## IN PROGRESS — "stringly-typed -> richer types" refactor (RESUME HERE)
