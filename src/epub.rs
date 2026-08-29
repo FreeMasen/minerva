@@ -32,6 +32,10 @@ pub struct EpubMeta {
     pub modified: Option<String>,
     pub subjects: Vec<String>,
     pub cover: Option<CoverRef>,
+    /// The series (collection) this book belongs to, if any.
+    pub series: Option<String>,
+    /// The book's position within its series (e.g. `2` or `1.5`).
+    pub series_index: Option<f64>,
 }
 
 /// Read and parse the metadata (including cover location) from an EPUB file.
@@ -111,6 +115,15 @@ fn parse_opf(opf: &str, opf_path: &str) -> Result<EpubMeta, String> {
     let mut cover: Option<(String, String)> = None; // (href, media-type)
     let mut cover_meta_id: Option<String> = None; // EPUB2 <meta name="cover" content=..>
 
+    // Series metadata. Calibre stores it as flat <meta name="calibre:series..">;
+    // EPUB3 uses a `belongs-to-collection` entry refined by collection-type and
+    // group-position, keyed by the collection element's id.
+    let mut calibre_series: Option<String> = None;
+    let mut calibre_series_index: Option<f64> = None;
+    let mut collections: Vec<(Option<String>, String)> = Vec::new(); // (id, name)
+    let mut collection_type: HashMap<String, String> = HashMap::new(); // id -> type
+    let mut collection_position: HashMap<String, f64> = HashMap::new(); // id -> position
+
     for n in doc.descendants() {
         match n.tag_name().name() {
             "title" if meta.title.is_none() => meta.title = text(n),
@@ -138,6 +151,36 @@ fn parse_opf(opf: &str, opf_path: &str) -> Result<EpubMeta, String> {
                 if n.attribute("name") == Some("cover") {
                     cover_meta_id = n.attribute("content").map(str::to_string);
                 }
+                match n.attribute("name") {
+                    Some("calibre:series") => {
+                        calibre_series = n.attribute("content").map(str::to_string)
+                    }
+                    Some("calibre:series_index") => {
+                        calibre_series_index = n.attribute("content").and_then(|v| v.parse().ok())
+                    }
+                    _ => {}
+                }
+                if n.attribute("property") == Some("belongs-to-collection") {
+                    if let Some(name) = text(n) {
+                        collections.push((n.attribute("id").map(str::to_string), name));
+                    }
+                }
+                if let Some(refines) = n.attribute("refines") {
+                    let target = refines.trim_start_matches('#').to_string();
+                    match n.attribute("property") {
+                        Some("collection-type") => {
+                            if let Some(t) = text(n) {
+                                collection_type.insert(target, t);
+                            }
+                        }
+                        Some("group-position") => {
+                            if let Some(p) = text(n).and_then(|v| v.parse().ok()) {
+                                collection_position.insert(target, p);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
             "item" => {
                 if let (Some(id), Some(href)) = (n.attribute("id"), n.attribute("href")) {
@@ -164,6 +207,22 @@ fn parse_opf(opf: &str, opf_path: &str) -> Result<EpubMeta, String> {
                 cover = Some(((*href).to_string(), (*mt).to_string()));
             }
         }
+    }
+
+    // Series: prefer an EPUB3 collection typed "series" (or an untyped one),
+    // otherwise fall back to the flat Calibre metadata.
+    let epub3_series = collections.iter().find(|(id, _)| {
+        id.as_deref()
+            .and_then(|i| collection_type.get(i))
+            .map(|t| t == "series")
+            .unwrap_or(true)
+    });
+    if let Some((id, name)) = epub3_series {
+        meta.series = Some(name.clone());
+        meta.series_index = id.as_deref().and_then(|i| collection_position.get(i)).copied();
+    } else {
+        meta.series = calibre_series;
+        meta.series_index = calibre_series_index;
     }
 
     meta.cover = cover.map(|(href, mt)| {
@@ -235,4 +294,47 @@ fn guess_media_type(path: &str) -> String {
         _ => "application/octet-stream",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_opf;
+
+    #[test]
+    fn parses_calibre_series_and_file_as_author() {
+        let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"
+            xmlns:opf="http://www.idpf.org/2007/opf">
+    <dc:title>Book Two</dc:title>
+    <dc:creator opf:file-as="Tolkien, J. R. R."></dc:creator>
+    <meta name="calibre:series" content="My Series"/>
+    <meta name="calibre:series_index" content="2.5"/>
+  </metadata>
+</package>"#;
+        let meta = parse_opf(opf, "content.opf").unwrap();
+        assert_eq!(meta.title.as_deref(), Some("Book Two"));
+        // Empty creator element falls back to the de-inverted file-as name.
+        assert_eq!(meta.author.as_deref(), Some("J. R. R. Tolkien"));
+        assert_eq!(meta.series.as_deref(), Some("My Series"));
+        assert_eq!(meta.series_index, Some(2.5));
+    }
+
+    #[test]
+    fn parses_epub3_belongs_to_collection() {
+        let opf = r##"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Book Three</dc:title>
+    <dc:creator>An Author</dc:creator>
+    <meta property="belongs-to-collection" id="c01">Epic Saga</meta>
+    <meta refines="#c01" property="collection-type">series</meta>
+    <meta refines="#c01" property="group-position">3</meta>
+  </metadata>
+</package>"##;
+        let meta = parse_opf(opf, "content.opf").unwrap();
+        assert_eq!(meta.author.as_deref(), Some("An Author"));
+        assert_eq!(meta.series.as_deref(), Some("Epic Saga"));
+        assert_eq!(meta.series_index, Some(3.0));
+    }
 }

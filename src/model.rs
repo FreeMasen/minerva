@@ -124,6 +124,10 @@ pub struct Metadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub modified: Option<String>,
 
+    /// Collections this publication belongs to (e.g. a series).
+    #[serde(rename = "belongsTo", skip_serializing_if = "Option::is_none")]
+    pub belongs_to: Option<BelongsTo>,
+
     // --- Pagination metadata (used on feeds) ---
     #[serde(rename = "numberOfItems", skip_serializing_if = "Option::is_none")]
     pub number_of_items: Option<u64>,
@@ -142,6 +146,23 @@ impl Metadata {
             ..Default::default()
         }
     }
+}
+
+/// The collections a publication belongs to. Only `series` is modelled.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct BelongsTo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub series: Option<Collection>,
+}
+
+/// A named collection with an optional position within it (a series and the
+/// book's number in that series).
+#[derive(Debug, Clone, Serialize)]
+pub struct Collection {
+    pub name: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position: Option<f64>,
 }
 
 /// A contributor (author, publisher, ...). May be a bare name or carry links.

@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, title, author, language, description, modified,\n                    price_cents, lendable, cover_zip_path, cover_media_type\n             FROM books ORDER BY modified DESC LIMIT ?",
+  "query": "SELECT id, title, author, language, description, modified,\n                    series, series_index, price_cents, lendable, cover_zip_path, cover_media_type\n             FROM books ORDER BY title COLLATE NOCASE",
   "describe": {
     "columns": [
       {
@@ -34,28 +34,38 @@
         "type_info": "Text"
       },
       {
-        "name": "price_cents",
+        "name": "series",
         "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "series_index",
+        "ordinal": 7,
+        "type_info": "Float"
+      },
+      {
+        "name": "price_cents",
+        "ordinal": 8,
         "type_info": "Integer"
       },
       {
         "name": "lendable",
-        "ordinal": 7,
+        "ordinal": 9,
         "type_info": "Integer"
       },
       {
         "name": "cover_zip_path",
-        "ordinal": 8,
+        "ordinal": 10,
         "type_info": "Text"
       },
       {
         "name": "cover_media_type",
-        "ordinal": 9,
+        "ordinal": 11,
         "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 0
     },
     "nullable": [
       false,
@@ -65,10 +75,12 @@
       true,
       true,
       true,
+      true,
+      true,
       false,
       true,
       true
     ]
   },
-  "hash": "09c42a867855660eb9c0e9214bd2c7f6cda061c3f84a3037c3ab3dae142f0b2c"
+  "hash": "cf90e1a753d82955b3d2090937a8fe5821398694e4eeea6616e21c26eab9a4e1"
 }

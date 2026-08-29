@@ -23,6 +23,9 @@ pub struct Book {
     pub language: Option<String>,
     pub description: Option<String>,
     pub modified: Option<jiff::Timestamp>,
+    /// The series this book belongs to, and its position within it, if any.
+    pub series: Option<String>,
+    pub series_index: Option<f64>,
     /// How the title may be acquired (free download, purchase, or borrow).
     pub acquisition: Acquisition,
     /// Where the book's bytes come from.
@@ -282,6 +285,14 @@ impl Book {
         metadata.language = self.language.clone();
         metadata.description = self.description.clone();
         metadata.modified = self.modified.as_ref().map(jiff::Timestamp::to_string);
+        if let Some(series) = &self.series {
+            metadata.belongs_to = Some(BelongsTo {
+                series: Some(Collection {
+                    name: series.clone(),
+                    position: self.series_index,
+                }),
+            });
+        }
 
         let self_link = Link::new(format!("{base}/opds/publications/{}", self.id))
             .with_rel("self")
@@ -406,6 +417,8 @@ pub(crate) fn sample_books() -> Vec<(Book, Category)> {
             language: Some("en".to_string()),
             description: Some(description.to_string()),
             modified: parse_timestamp(modified),
+            series: None,
+            series_index: None,
             acquisition,
             source: BookSource::Sample,
             cover: None,

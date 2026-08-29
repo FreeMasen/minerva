@@ -45,6 +45,10 @@
         <form onsubmit="return save_properties(this)">
           <input name="title" value="{{ book.title }}" aria-label="title">
           <input name="author" value="{{ book.author }}" aria-label="author">
+          <input name="series" value="{{ book.series | default(value='') }}"
+                 placeholder="series" aria-label="series">
+          <input name="series_index" value="{{ book.series_index | default(value='') }}"
+                 placeholder="#" aria-label="series number" size="4" inputmode="decimal">
           <button data-book-id="{{ book.id }}">Save</button>
         </form>
         <div class="cats">

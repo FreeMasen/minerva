@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT b.id AS \"id!\", b.title AS \"title!\", b.author AS \"author!\",\n                      b.language, b.description, b.modified, b.price_cents,\n                      b.lendable AS \"lendable!\", b.cover_zip_path, b.cover_media_type\n               FROM books b\n               JOIN book_categories bc ON bc.book_id = b.id\n               WHERE bc.category_slug = ?\n               ORDER BY b.title COLLATE NOCASE",
+  "query": "SELECT b.id AS \"id!\", b.title AS \"title!\", b.author AS \"author!\",\n                      b.language, b.description, b.modified, b.series, b.series_index,\n                      b.price_cents, b.lendable AS \"lendable!\", b.cover_zip_path, b.cover_media_type\n               FROM books b\n               JOIN book_categories bc ON bc.book_id = b.id\n               WHERE bc.category_slug = ?\n               ORDER BY b.title COLLATE NOCASE",
   "describe": {
     "columns": [
       {
@@ -34,23 +34,33 @@
         "type_info": "Text"
       },
       {
-        "name": "price_cents",
+        "name": "series",
         "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "series_index",
+        "ordinal": 7,
+        "type_info": "Float"
+      },
+      {
+        "name": "price_cents",
+        "ordinal": 8,
         "type_info": "Integer"
       },
       {
         "name": "lendable!",
-        "ordinal": 7,
+        "ordinal": 9,
         "type_info": "Integer"
       },
       {
         "name": "cover_zip_path",
-        "ordinal": 8,
+        "ordinal": 10,
         "type_info": "Text"
       },
       {
         "name": "cover_media_type",
-        "ordinal": 9,
+        "ordinal": 11,
         "type_info": "Text"
       }
     ],
@@ -65,10 +75,12 @@
       true,
       true,
       true,
+      true,
+      true,
       false,
       true,
       true
     ]
   },
-  "hash": "bc8868f39affe4236976a82243f15d5652a1396923157cf3c7aaabcc44dd2ace"
+  "hash": "b438a7e175938c19ed28b469ba17ae43e7d9434dbbbc10f967932cf21619a889"
 }

@@ -19,7 +19,7 @@ use crate::epub::{CoverRef, EpubMeta};
 
 /// The `books` columns loaded into a [`BookRow`], in a fixed order.
 const BOOK_COLUMNS: &str = "id, title, author, language, description, modified, \
-     price_cents, lendable, cover_zip_path, cover_media_type";
+     series, series_index, price_cents, lendable, cover_zip_path, cover_media_type";
 
 /// A flat row from the `books` table; combined with its files to make a [`Book`].
 #[derive(sqlx::FromRow)]
@@ -30,6 +30,8 @@ struct BookRow {
     language: Option<String>,
     description: Option<String>,
     modified: Option<String>,
+    series: Option<String>,
+    series_index: Option<f64>,
     price_cents: Option<i64>,
     lendable: i64,
     cover_zip_path: Option<String>,
@@ -66,6 +68,8 @@ impl BookRow {
             language: self.language,
             description: self.description,
             modified: self.modified.as_deref().and_then(catalog::parse_timestamp),
+            series: self.series,
+            series_index: self.series_index,
             acquisition,
             source,
             cover,
@@ -99,7 +103,7 @@ impl CatalogStore {
         let row = sqlx::query_as!(
             BookRow,
             "SELECT id, title, author, language, description, modified,
-                    price_cents, lendable, cover_zip_path, cover_media_type
+                    series, series_index, price_cents, lendable, cover_zip_path, cover_media_type
              FROM books WHERE id = ?",
             id
         )
@@ -118,7 +122,7 @@ impl CatalogStore {
         let rows = sqlx::query_as!(
             BookRow,
             "SELECT id, title, author, language, description, modified,
-                    price_cents, lendable, cover_zip_path, cover_media_type
+                    series, series_index, price_cents, lendable, cover_zip_path, cover_media_type
              FROM books ORDER BY title COLLATE NOCASE LIMIT ? OFFSET ?",
             limit,
             offset
@@ -135,7 +139,7 @@ impl CatalogStore {
         let rows = sqlx::query_as!(
             BookRow,
             "SELECT id, title, author, language, description, modified,
-                    price_cents, lendable, cover_zip_path, cover_media_type
+                    series, series_index, price_cents, lendable, cover_zip_path, cover_media_type
              FROM books ORDER BY modified DESC LIMIT ?",
             limit
         )
@@ -151,7 +155,7 @@ impl CatalogStore {
         let rows = sqlx::query_as!(
             BookRow,
             "SELECT id, title, author, language, description, modified,
-                    price_cents, lendable, cover_zip_path, cover_media_type
+                    series, series_index, price_cents, lendable, cover_zip_path, cover_media_type
              FROM books ORDER BY title COLLATE NOCASE"
         )
         .fetch_all(&self.pool)
@@ -273,8 +277,8 @@ impl CatalogStore {
         let rows = sqlx::query_as!(
             BookRow,
             r#"SELECT b.id AS "id!", b.title AS "title!", b.author AS "author!",
-                      b.language, b.description, b.modified, b.price_cents,
-                      b.lendable AS "lendable!", b.cover_zip_path, b.cover_media_type
+                      b.language, b.description, b.modified, b.series, b.series_index,
+                      b.price_cents, b.lendable AS "lendable!", b.cover_zip_path, b.cover_media_type
                FROM books b
                JOIN book_categories bc ON bc.book_id = b.id
                WHERE bc.category_slug = ?
@@ -379,7 +383,7 @@ impl CatalogStore {
         let rows = sqlx::query_as!(
             BookRow,
             "SELECT id, title, author, language, description, modified,
-                    price_cents, lendable, cover_zip_path, cover_media_type
+                    series, series_index, price_cents, lendable, cover_zip_path, cover_media_type
              FROM books WHERE author = ? ORDER BY title COLLATE NOCASE",
             author
         )
@@ -404,6 +408,26 @@ impl CatalogStore {
         let result = sqlx::query!("UPDATE books SET author = ? WHERE id = ?", author, id)
             .execute(&self.pool)
             .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Set (or clear) a book's series name and position. Returns whether a book
+    /// with that id existed. Note: a later re-scan of the file overwrites this
+    /// from the file's own metadata, as with title/author.
+    pub async fn set_series(
+        &self,
+        id: &str,
+        series: Option<&str>,
+        series_index: Option<f64>,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query!(
+            "UPDATE books SET series = ?, series_index = ? WHERE id = ?",
+            series,
+            series_index,
+            id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -562,10 +586,12 @@ impl CatalogStore {
         let language = meta.language.as_deref();
         let description = meta.description.as_deref();
         let modified = normalize_modified(meta);
+        let series = meta.series.as_deref();
+        let series_index = meta.series_index;
         if let Err(err) = sqlx::query!(
             "INSERT INTO books (id, work_key, title, author, language, description,
-                 modified, cover_zip_path, cover_media_type, meta_rank)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 modified, series, series_index, cover_zip_path, cover_media_type, meta_rank)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             id,
             work,
             title,
@@ -573,6 +599,8 @@ impl CatalogStore {
             language,
             description,
             modified,
+            series,
+            series_index,
             cover_zip,
             cover_type,
             rank,
@@ -597,15 +625,20 @@ impl CatalogStore {
         let language = meta.language.as_deref();
         let description = meta.description.as_deref();
         let modified = normalize_modified(meta);
+        let series = meta.series.as_deref();
+        let series_index = meta.series_index;
         let _ = sqlx::query!(
             "UPDATE books SET title = ?, author = ?, language = ?, description = ?,
-                 modified = ?, cover_zip_path = ?, cover_media_type = ?, meta_rank = ?
+                 modified = ?, series = ?, series_index = ?,
+                 cover_zip_path = ?, cover_media_type = ?, meta_rank = ?
              WHERE id = ?",
             title,
             author,
             language,
             description,
             modified,
+            series,
+            series_index,
             cover_zip,
             cover_type,
             rank,

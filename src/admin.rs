@@ -43,6 +43,10 @@ pub fn routes() -> Router<Arc<AppState>> {
 struct Properties {
     title: String,
     author: String,
+    #[serde(default)]
+    series: String,
+    #[serde(default)]
+    series_index: String,
 }
 
 #[derive(Deserialize)]
@@ -63,6 +67,8 @@ struct BookView {
     id: String,
     title: String,
     author: String,
+    series: Option<String>,
+    series_index: Option<f64>,
     categories: Vec<Category>,
     downloads: Vec<DownloadView>,
 }
@@ -86,6 +92,8 @@ async fn page(State(state): State<Arc<AppState>>) -> Response {
             id: book.id,
             title: book.title,
             author: book.author,
+            series: book.series,
+            series_index: book.series_index,
             categories,
             downloads,
         });
@@ -121,8 +129,19 @@ async fn set_properties(
     if state.catalog.get(&id).await.is_none() {
         return (StatusCode::NOT_FOUND, "No such book.").into_response();
     }
+    let series = props.series.trim();
+    let series = (!series.is_empty()).then_some(series);
+    let series_index = props.series_index.trim();
+    let series_index = match series_index.is_empty() {
+        true => None,
+        false => match series_index.parse::<f64>() {
+            Ok(n) => Some(n),
+            Err(_) => return (StatusCode::BAD_REQUEST, "Series number must be a number.").into_response(),
+        },
+    };
     let _ = state.catalog.set_title(&id, title).await;
     let _ = state.catalog.set_author(&id, props.author.trim()).await;
+    let _ = state.catalog.set_series(&id, series, series_index).await;
     StatusCode::OK.into_response()
 }
 

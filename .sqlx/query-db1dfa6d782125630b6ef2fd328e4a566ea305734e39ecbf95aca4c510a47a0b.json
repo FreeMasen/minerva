@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE books SET series = ?, series_index = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "db1dfa6d782125630b6ef2fd328e4a566ea305734e39ecbf95aca4c510a47a0b"
+}
