@@ -6,7 +6,7 @@ use std::path::Path as FsPath;
 use std::sync::{Arc, LazyLock};
 
 use axum::{
-    Form, Router,
+    Form, Json, Router,
     extract::{Multipart, Path, State},
     http::StatusCode,
     response::{Html, IntoResponse, Redirect, Response},
@@ -15,7 +15,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::catalog::Category;
+use crate::catalog::{BookSource, Category};
 
 /// The (autoescaping) Tera templates, compiled once from the embedded sources.
 static TEMPLATES: LazyLock<tera::Tera> = LazyLock::new(|| {
@@ -50,6 +50,13 @@ struct CategoryName {
     name: String,
 }
 
+/// A downloadable format of a book, as rendered on the admin page.
+#[derive(Serialize)]
+struct DownloadView {
+    label: String,
+    href: String,
+}
+
 /// A book as rendered on the admin page.
 #[derive(Serialize)]
 struct BookView {
@@ -57,6 +64,7 @@ struct BookView {
     title: String,
     author: String,
     categories: Vec<Category>,
+    downloads: Vec<DownloadView>,
 }
 
 /// The management page: an upload form and a row per book.
@@ -64,11 +72,22 @@ async fn page(State(state): State<Arc<AppState>>) -> Response {
     let mut books = Vec::new();
     for book in state.catalog.all().await {
         let categories = state.catalog.book_categories(&book.id).await;
+        let downloads = match &book.source {
+            BookSource::Files(files) => files
+                .iter()
+                .map(|f| DownloadView {
+                    label: f.format.ext().to_uppercase(),
+                    href: format!("/opds/download/{}/{}", book.id, f.format.ext()),
+                })
+                .collect(),
+            BookSource::Sample => Vec::new(),
+        };
         books.push(BookView {
             id: book.id,
             title: book.title,
             author: book.author,
             categories,
+            downloads,
         });
     }
 
@@ -86,26 +105,48 @@ async fn page(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
+// The mutation handlers are called by fetch() from the admin page and return a
+// bare status (with a plain-text message on error) rather than redirecting, so
+// the page updates in place without a reload.
+
 async fn set_properties(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Form(props): Form<Properties>,
 ) -> Response {
-    let _ = state.catalog.set_title(&id, props.title.trim()).await;
+    let title = props.title.trim();
+    if title.is_empty() {
+        return (StatusCode::BAD_REQUEST, "Title is required.").into_response();
+    }
+    if state.catalog.get(&id).await.is_none() {
+        return (StatusCode::NOT_FOUND, "No such book.").into_response();
+    }
+    let _ = state.catalog.set_title(&id, title).await;
     let _ = state.catalog.set_author(&id, props.author.trim()).await;
-    Redirect::to("/admin").into_response()
+    StatusCode::OK.into_response()
 }
 
+/// Assign a category and return the canonical (server-slugified) category as
+/// JSON, so the client renders the chip with the real slug rather than guessing.
 async fn add_category(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Form(body): Form<CategoryName>,
 ) -> Response {
     let name = body.name.trim();
-    if !name.is_empty() && state.catalog.get(&id).await.is_some() {
-        let _ = state.catalog.assign_category(&id, name).await;
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "Category name is required.").into_response();
     }
-    Redirect::to("/admin").into_response()
+    if state.catalog.get(&id).await.is_none() {
+        return (StatusCode::NOT_FOUND, "No such book.").into_response();
+    }
+    match state.catalog.assign_category(&id, name).await {
+        Ok(category) => Json(category).into_response(),
+        Err(err) => {
+            tracing::error!(?err, id, "failed to assign category");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to add category.").into_response()
+        }
+    }
 }
 
 async fn remove_category(
@@ -113,12 +154,12 @@ async fn remove_category(
     Path((id, slug)): Path<(String, String)>,
 ) -> Response {
     state.catalog.remove_category(&id, &slug).await;
-    Redirect::to("/admin").into_response()
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn remove_book(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     let _ = state.catalog.remove_book(&id).await;
-    Redirect::to("/admin").into_response()
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// Save an uploaded EPUB into the library directory and reconcile.

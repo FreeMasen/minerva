@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>opds-axum admin</title>
+  <title>minerva admin</title>
   <style>
     body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 64rem; }
     table { border-collapse: collapse; width: 100%; }
@@ -14,54 +14,131 @@
             border-radius: 1rem; padding: .1rem .5rem; margin: .1rem; }
     .chip button { border: none; background: none; cursor: pointer; padding: 0; }
     .chip input { border: none; background: none; width: 8rem; }
+    .downloads a { margin-right: .5rem; }
+    #error-message:empty { display: none; }
+    #error-message { position: sticky; top: 0; background: #fdd; color: #900;
+                     padding: .5rem; border-radius: .25rem; margin: .5rem 0; }
   </style>
 </head>
 <body>
-  <h1>Catalog admin</h1>
+  <header>
+    <h1>minerva — catalog admin</h1>
+    <p id="error-message"></p>
+    <h2>Upload</h2>
+    {% if has_library %}
+    <form method="post" action="/admin/upload" enctype="multipart/form-data">
+      <input type="file" name="file" accept=".epub" required>
+      <button>Upload EPUB</button>
+    </form>
+    {% else %}
+    <p><em>Set <code>OPDS_LIBRARY_DIR</code> to enable uploads.</em></p>
+    {% endif %}
+  </header>
 
-  <h2>Upload</h2>
-  {% if has_library %}
-  <form method="post" action="/admin/upload" enctype="multipart/form-data">
-    <input type="file" name="file" accept=".epub" required>
-    <button>Upload EPUB</button>
-  </form>
-  {% else %}
-  <p><em>Set <code>OPDS_LIBRARY_DIR</code> to enable uploads.</em></p>
-  {% endif %}
-
+  <main>
   <h2>Books ({{ count }})</h2>
   <table>
-    <tr><th>Title / author / categories</th><th>id</th><th></th></tr>
+    <tr><th>Title / author / categories</th><th>Download</th><th>id</th><th></th></tr>
     {% for book in books %}
     <tr>
       <td>
-        <form method="post" action="/admin/books/{{ book.id }}/properties">
+        <form onsubmit="return save_properties(this)">
           <input name="title" value="{{ book.title }}" aria-label="title">
           <input name="author" value="{{ book.author }}" aria-label="author">
-          <button>Save</button>
+          <button data-book-id="{{ book.id }}">Save</button>
         </form>
         <div class="cats">
           {% for category in book.categories %}
-          <form class="chip" method="post"
-                action="/admin/books/{{ book.id }}/categories/{{ category.slug }}/delete">
-            <span>{{ category.label }}</span><button title="remove">&times;</button>
-          </form>
+          <span class="chip">
+            <span>{{ category.label }}</span>
+            <button type="button" title="remove"
+                    data-book-id="{{ book.id }}" data-category-slug="{{ category.slug }}"
+                    onclick="remove_category(this)">&times;</button>
+          </span>
           {% endfor %}
-          <form class="chip" method="post" action="/admin/books/{{ book.id }}/categories">
+          <form class="chip" onsubmit="return add_category(this)">
             <input name="name" placeholder="add category" aria-label="add category">
-            <button>+</button>
+            <button data-book-id="{{ book.id }}">+</button>
           </form>
         </div>
       </td>
+      <td class="downloads">
+        {% for d in book.downloads %}<a href="{{ d.href }}">{{ d.label }}</a>{% endfor %}
+      </td>
       <td><code>{{ book.id }}</code></td>
       <td>
-        <form method="post" action="/admin/books/{{ book.id }}/delete"
-              onsubmit="return confirm('Remove this book?')">
-          <button>Remove</button>
-        </form>
+        <button type="button" data-book-id="{{ book.id }}" onclick="remove_book(this)">Remove</button>
       </td>
     </tr>
     {% endfor %}
   </table>
+  </main>
+
+  <script>
+    const errorBox = document.getElementById("error-message");
+
+    // POST a form as urlencoded; show the response body in the error banner and
+    // throw on failure so callers can bail without mutating the DOM.
+    async function post(url, form) {
+      errorBox.textContent = "";
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: form ? new URLSearchParams(new FormData(form)) : undefined,
+      });
+      if (!resp.ok) {
+        const body = await resp.text();
+        errorBox.textContent = body || resp.statusText;
+        throw new Error(body);
+      }
+      return resp;
+    }
+
+    // Build a category chip (label + remove button) for a book.
+    function makeChip(bookId, category) {
+      const chip = document.createElement("span");
+      chip.className = "chip";
+      const label = document.createElement("span");
+      label.textContent = category.label;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.title = "remove";
+      remove.textContent = "×";
+      remove.dataset.bookId = bookId;
+      remove.dataset.categorySlug = category.slug;
+      remove.addEventListener("click", () => remove_category(remove));
+      chip.append(label, remove);
+      return chip;
+    }
+
+    async function save_properties(form) {
+      const id = form.querySelector("button").dataset.bookId;
+      await post(`/admin/books/${encodeURIComponent(id)}/properties`, form);
+      return false;
+    }
+
+    async function add_category(form) {
+      const id = form.querySelector("button").dataset.bookId;
+      const resp = await post(`/admin/books/${encodeURIComponent(id)}/categories`, form);
+      // The server returns the canonical (slugified) category, so the chip's
+      // slug always matches what a later remove will send.
+      const category = await resp.json();
+      form.insertAdjacentElement("beforebegin", makeChip(id, category));
+      form.reset();
+      return false;
+    }
+
+    async function remove_category(btn) {
+      const { bookId, categorySlug } = btn.dataset;
+      await post(`/admin/books/${encodeURIComponent(bookId)}/categories/${encodeURIComponent(categorySlug)}/delete`);
+      btn.closest(".chip").remove();
+    }
+
+    async function remove_book(btn) {
+      if (!confirm("Remove this book?")) return;
+      await post(`/admin/books/${encodeURIComponent(btn.dataset.bookId)}/delete`);
+      btn.closest("tr").remove();
+    }
+  </script>
 </body>
 </html>

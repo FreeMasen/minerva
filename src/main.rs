@@ -1759,23 +1759,34 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let html = String::from_utf8(body.to_vec()).unwrap();
-        assert!(html.contains("Catalog admin"));
+        assert!(html.contains("catalog admin"));
         assert!(html.contains("Moby-Dick"));
 
-        // Editing properties updates the publication.
+        // Editing properties updates the publication (AJAX: 200, no redirect).
         let response = post("/admin/books/moby-dick/properties", "title=Renamed&author=Someone")
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.status(), StatusCode::OK);
         let response = get("/opds/publications/moby-dick").await.unwrap();
         let json: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
         assert_eq!(json["metadata"]["title"], "Renamed");
 
-        // Removing a book makes it 404.
+        // Adding a category returns the canonical, slugified category as JSON.
+        let response = post("/admin/books/moby-dick/categories", "name=Sea Stories")
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(json["slug"], "sea-stories");
+        assert_eq!(json["label"], "Sea Stories");
+
+        // Removing a book makes it 404 (AJAX: 204, no redirect).
         let response = post("/admin/books/frankenstein/delete", "").await.unwrap();
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
         let response = get("/opds/publications/frankenstein").await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
