@@ -12,12 +12,56 @@ use std::path::{Path, PathBuf};
 use crate::epub::{self, CoverRef};
 use crate::model::*;
 
+/// Define a transparent `String` newtype: a distinct domain identifier that is
+/// still a plain string on the wire, in the DB, and in URLs.
+macro_rules! string_id {
+    ($(#[$doc:meta])* $name:ident) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(pub String);
+
+        impl $name {
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+        impl From<String> for $name {
+            fn from(s: String) -> Self {
+                $name(s)
+            }
+        }
+        impl From<&str> for $name {
+            fn from(s: &str) -> Self {
+                $name(s.to_string())
+            }
+        }
+    };
+}
+
+string_id! {
+    /// A book's stable identifier: a human-readable URL slug (e.g. `moby-dick`)
+    /// derived from the title — deliberately a slug, not an opaque uuid/integer,
+    /// so it reads well in `/opds/publications/{id}`.
+    BookId
+}
+
+string_id! {
+    /// A category's URL slug (e.g. `science-fiction`).
+    CategorySlug
+}
+
 /// A single book in the catalog. This is the server's own domain type, kept
 /// separate from the wire (`Publication`) representation. A book's categories
 /// are a separate many-to-many relation (see [`crate::library`]).
 #[derive(Debug, Clone)]
 pub struct Book {
-    pub id: String,
+    pub id: BookId,
     pub title: String,
     pub author: String,
     pub language: Option<String>,
@@ -122,12 +166,12 @@ impl Format {
 /// demand; a book may belong to several.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Category {
-    pub slug: String,
+    pub slug: CategorySlug,
     pub label: String,
 }
 
 impl Category {
-    pub fn new(slug: impl Into<String>, label: impl Into<String>) -> Self {
+    pub fn new(slug: impl Into<CategorySlug>, label: impl Into<String>) -> Self {
         Category {
             slug: slug.into(),
             label: label.into(),
@@ -411,7 +455,7 @@ pub(crate) fn sample_books() -> Vec<(Book, Category)> {
                 acquisition: Acquisition|
      -> (Book, Category) {
         let book = Book {
-            id: id.to_string(),
+            id: BookId::from(id),
             title: title.to_string(),
             author: author.to_string(),
             language: Some("en".to_string()),

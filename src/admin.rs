@@ -77,7 +77,7 @@ struct BookView {
 async fn page(State(state): State<Arc<AppState>>) -> Response {
     let mut books = Vec::new();
     for book in state.catalog.all().await {
-        let categories = state.catalog.book_categories(&book.id).await;
+        let categories = state.catalog.book_categories(book.id.as_str()).await;
         let downloads = match &book.source {
             BookSource::Files(files) => files
                 .iter()
@@ -89,7 +89,7 @@ async fn page(State(state): State<Arc<AppState>>) -> Response {
             BookSource::Sample => Vec::new(),
         };
         books.push(BookView {
-            id: book.id,
+            id: book.id.0,
             title: book.title,
             author: book.author,
             series: book.series,

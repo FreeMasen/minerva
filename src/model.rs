@@ -304,9 +304,11 @@ pub struct LinkProperties {
     pub copies: Option<Copies>,
 }
 
-/// The lending state of a resource.
+/// The lending state of a resource. Only `Available` is currently produced; the
+/// rest are part of the modelled vocabulary for completeness.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "lowercase")]
+#[allow(dead_code)]
 pub enum AvailabilityState {
     Available,
     Unavailable,

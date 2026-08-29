@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 
 use sqlx::SqlitePool;
 
-use crate::catalog::{self, Acquisition, Book, BookFile, BookSource, Category, Format, UsdCents};
+use crate::catalog::{
+    self, Acquisition, Book, BookFile, BookId, BookSource, Category, Format, UsdCents,
+};
 use crate::epub::{CoverRef, EpubMeta};
 
 /// The `books` columns loaded into a [`BookRow`], in a fixed order.
@@ -62,7 +64,7 @@ impl BookRow {
             Acquisition::OpenAccess
         };
         Book {
-            id: self.id,
+            id: BookId(self.id),
             title: self.title,
             author: self.author,
             language: self.language,
@@ -316,7 +318,10 @@ impl CatalogStore {
     pub async fn assign_category(&self, book_id: &str, name: &str) -> Result<Category, sqlx::Error> {
         let category = Category::new(catalog::slugify(name), name.trim());
         self.seed_category(book_id, &category).await?;
-        Ok(self.category(&category.slug).await.unwrap_or(category))
+        Ok(self
+            .category(category.slug.as_str())
+            .await
+            .unwrap_or(category))
     }
 
     /// Remove a category from a book (idempotent).
@@ -332,9 +337,10 @@ impl CatalogStore {
 
     /// Create the category if needed and associate it with the book.
     async fn seed_category(&self, book_id: &str, category: &Category) -> Result<(), sqlx::Error> {
+        let slug = category.slug.as_str();
         sqlx::query!(
             "INSERT OR IGNORE INTO categories (slug, label) VALUES (?, ?)",
-            category.slug,
+            slug,
             category.label
         )
         .execute(&self.pool)
@@ -342,7 +348,7 @@ impl CatalogStore {
         sqlx::query!(
             "INSERT OR IGNORE INTO book_categories (book_id, category_slug) VALUES (?, ?)",
             book_id,
-            category.slug
+            slug
         )
         .execute(&self.pool)
         .await?;
@@ -747,11 +753,12 @@ impl CatalogStore {
                 Acquisition::Borrow => (None, 1),
             };
             let work = catalog::work_key(&book.title, &book.author);
+            let id = book.id.as_str();
             if let Err(err) = sqlx::query!(
                 "INSERT INTO books (id, work_key, title, author, language, description,
                      modified, price_cents, lendable, meta_rank)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
-                book.id,
+                id,
                 work,
                 book.title,
                 book.author,
@@ -767,7 +774,7 @@ impl CatalogStore {
                 tracing::error!(?err, id = %book.id, "failed to seed sample book");
                 continue;
             }
-            if let Err(err) = self.seed_category(&book.id, &category).await {
+            if let Err(err) = self.seed_category(book.id.as_str(), &category).await {
                 tracing::error!(?err, id = %book.id, "failed to seed sample category");
             }
         }

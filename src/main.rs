@@ -1423,7 +1423,7 @@ mod tests {
         // Same path again: still one book, one file, same id.
         store.ingest(&dir, &path).await;
         assert_eq!(store.count().await, 1);
-        let refreshed = store.get(&id).await.expect("same id");
+        let refreshed = store.get(id.as_str()).await.expect("same id");
         match &refreshed.source {
             BookSource::Files(files) => assert_eq!(files.len(), 1),
             _ => panic!("expected file-backed book"),
@@ -1671,10 +1671,10 @@ mod tests {
         assert_eq!(store.count().await, 2);
         for book in store.all().await {
             let slugs: Vec<String> = store
-                .book_categories(&book.id)
+                .book_categories(book.id.as_str())
                 .await
                 .into_iter()
-                .map(|c| c.slug)
+                .map(|c| c.slug.0)
                 .collect();
             if book.title.contains("Moby") {
                 assert_eq!(slugs, ["fiction"]);
@@ -1698,7 +1698,7 @@ mod tests {
             .book_categories("moby-dick")
             .await
             .into_iter()
-            .map(|c| c.slug)
+            .map(|c| c.slug.0)
             .collect();
         assert_eq!(initial, ["fiction"]);
 
@@ -1707,19 +1707,19 @@ mod tests {
             .assign_category("moby-dick", "Sea Stories")
             .await
             .unwrap();
-        assert_eq!(category.slug, "sea-stories");
+        assert_eq!(category.slug.as_str(), "sea-stories");
         assert_eq!(category.label, "Sea Stories");
 
         let slugs: Vec<String> = store
             .book_categories("moby-dick")
             .await
             .into_iter()
-            .map(|c| c.slug)
+            .map(|c| c.slug.0)
             .collect();
         assert_eq!(slugs, ["fiction", "sea-stories"]); // ordered by label
 
         // It now shows up in the (non-empty) category listing.
-        assert!(store.categories().await.iter().any(|(c, n)| c.slug == "sea-stories" && *n == 1));
+        assert!(store.categories().await.iter().any(|(c, n)| c.slug.as_str() == "sea-stories" && *n == 1));
         assert_eq!(store.books_in_category("sea-stories").await.len(), 1);
 
         // Removing it is reflected, and a second remove is a no-op.
@@ -1729,7 +1729,7 @@ mod tests {
             .book_categories("moby-dick")
             .await
             .into_iter()
-            .map(|c| c.slug)
+            .map(|c| c.slug.0)
             .collect();
         assert_eq!(slugs, ["fiction"]);
     }

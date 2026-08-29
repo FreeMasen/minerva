@@ -11,7 +11,7 @@ pub fn cover_svg(book: &Book, width: u32, height: u32) -> String {
     let title = xml_escape(&book.title);
     let author = xml_escape(&book.author);
     // Deterministically pick a background hue from the id so covers differ.
-    let hue = book.id.bytes().fold(0u32, |acc, b| acc + b as u32) % 360;
+    let hue = book.id.as_str().bytes().fold(0u32, |acc, b| acc + b as u32) % 360;
     format!(
         r##"<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
