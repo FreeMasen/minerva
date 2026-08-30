@@ -5,10 +5,14 @@
       categories.slug is the PK so "Fiction"/"fiction" collapse); add_category now
       returns the canonical category as JSON so the chip's slug matches the server
 - [x] admin page should link to book downloads — new Download column
-- [~] lots of my books are missing authors — added a fallback to the creator
-      `opf:file-as` attribute for EPUBs that leave <dc:creator> empty. NEEDS A
-      SAMPLE from the real library to confirm the actual cause (could also be
-      XTC files with no embedded author, which can't be recovered).
+- [x] lots of my books are missing authors — root cause (from a sample) was
+      Calibre exporting a literal `<dc:creator>Unknown</dc:creator>`; the real
+      author is only in the folder layout. Deliberately did NOT guess the author
+      from the folder path (fragile — genre/flat layouts would produce silent
+      wrong authors). Instead: keep the `opf:file-as` parsing fallback, normalize
+      placeholder authors ("", "Unknown", "Unknown Author") to one canonical
+      value, and add an admin filter (`/admin?unknown=1`) listing books that need
+      an author so they can be fixed inline.
 - [x] book slugs replace accented letters with `-` — slugify now transliterates
       via deunicode ("République" -> "republique")
 - [x] A way to note what number in a series of a book would be good — series +

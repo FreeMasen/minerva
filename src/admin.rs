@@ -7,7 +7,7 @@ use std::sync::{Arc, LazyLock};
 
 use axum::{
     Form, Json, Router,
-    extract::{Multipart, Path, State},
+    extract::{Multipart, Path, Query, State},
     http::StatusCode,
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
@@ -15,7 +15,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::catalog::{BookSource, Category};
+use crate::catalog::{self, BookSource, Category};
 
 /// The (autoescaping) Tera templates, compiled once from the embedded sources.
 static TEMPLATES: LazyLock<tera::Tera> = LazyLock::new(|| {
@@ -73,10 +73,26 @@ struct BookView {
     downloads: Vec<DownloadView>,
 }
 
+#[derive(Deserialize)]
+struct PageQuery {
+    /// When present, list only books whose author is missing/placeholder.
+    unknown: Option<String>,
+}
+
 /// The management page: an upload form and a row per book.
-async fn page(State(state): State<Arc<AppState>>) -> Response {
+async fn page(State(state): State<Arc<AppState>>, Query(query): Query<PageQuery>) -> Response {
+    let unknown_only = query.unknown.is_some();
+    let all = state.catalog.all().await;
+    let unknown_count = all
+        .iter()
+        .filter(|b| catalog::is_placeholder_author(&b.author))
+        .count();
+
     let mut books = Vec::new();
-    for book in state.catalog.all().await {
+    for book in all {
+        if unknown_only && !catalog::is_placeholder_author(&book.author) {
+            continue;
+        }
         let categories = state.catalog.book_categories(book.id.as_str()).await;
         let downloads = match &book.source {
             BookSource::Files(files) => files
@@ -103,6 +119,8 @@ async fn page(State(state): State<Arc<AppState>>) -> Response {
     context.insert("count", &books.len());
     context.insert("books", &books);
     context.insert("has_library", &state.library_dir.is_some());
+    context.insert("unknown_only", &unknown_only);
+    context.insert("unknown_count", &unknown_count);
 
     match TEMPLATES.render("admin.html", &context) {
         Ok(html) => Html(html).into_response(),

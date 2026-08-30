@@ -37,6 +37,11 @@
 
   <main>
   <h2>Books ({{ count }})</h2>
+  {% if unknown_only %}
+  <p><a href="/admin">Show all books</a> — listing {{ count }} with no author.</p>
+  {% elif unknown_count > 0 %}
+  <p><a href="/admin?unknown=1">Show only the {{ unknown_count }} book(s) needing an author</a></p>
+  {% endif %}
   <table>
     <tr><th>Title / author / categories</th><th>Download</th><th>id</th><th></th></tr>
     {% for book in books %}

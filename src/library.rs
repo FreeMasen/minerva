@@ -529,10 +529,14 @@ impl CatalogStore {
 
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("book");
         let title = meta.title.clone().unwrap_or_else(|| stem.to_string());
+        // Use the embedded author unless it's missing or a placeholder (Calibre
+        // writes a literal "Unknown"); normalize those to one canonical value so
+        // the admin UI can surface them for fixing.
         let author = meta
             .author
             .clone()
-            .unwrap_or_else(|| "Unknown Author".to_string());
+            .filter(|a| !catalog::is_placeholder_author(a))
+            .unwrap_or_else(|| catalog::UNKNOWN_AUTHOR.to_string());
         let work = catalog::work_key(&title, &author);
 
         let existing = sqlx::query!(

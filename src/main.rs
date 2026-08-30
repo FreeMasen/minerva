@@ -1543,6 +1543,32 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    // A missing/placeholder author (Calibre writes a literal "Unknown") is
+    // normalized to the canonical placeholder rather than stored verbatim.
+    #[tokio::test]
+    async fn placeholder_author_is_normalized() {
+        use std::fs;
+
+        let dir =
+            std::env::temp_dir().join(format!("opds-unknown-author-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let samples = CatalogStore::new(db::connect_memory().await.unwrap());
+        samples.reset_to_samples().await;
+        let mut book = samples.get("moby-dick").await.unwrap();
+        book.author = "Unknown".to_string(); // Calibre-style placeholder
+        fs::write(dir.join("moby.epub"), assets::epub_bytes(&book)).unwrap();
+
+        let store = CatalogStore::new(db::connect_memory().await.unwrap());
+        store.reconcile_dir(&dir).await;
+
+        let stored = store.all().await.remove(0);
+        assert_eq!(stored.author, "Unknown Author");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn thumbnail_downscales_and_reencodes_as_jpeg() {
         // A 400x600 solid PNG (2:3 aspect, same as the 160x240 thumbnail box).

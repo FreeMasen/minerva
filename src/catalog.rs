@@ -225,13 +225,26 @@ fn category_from_folder(root: &Path, path: &Path) -> Option<Category> {
     if rel.components().count() < 2 {
         return None;
     }
-    let top = rel.components().next()?.as_os_str().to_str()?.to_lowercase();
-    match top.as_str() {
+    let top = rel.components().next()?.as_os_str().to_str()?;
+    match top.to_lowercase().as_str() {
         "fiction" => Some(Category::new("fiction", "Fiction")),
         "non-fiction" | "nonfiction" => Some(Category::new("nonfiction", "Non-Fiction")),
         _ => None,
     }
 }
+
+/// Whether a book's author is missing or a placeholder (Calibre exports a
+/// literal "Unknown" when the author is unset). Such authors are normalized to a
+/// single canonical value and can be surfaced in the admin UI for fixing.
+pub(crate) fn is_placeholder_author(author: &str) -> bool {
+    matches!(
+        author.trim().to_lowercase().as_str(),
+        "" | "unknown" | "unknown author"
+    )
+}
+
+/// The canonical placeholder used when a book has no usable author.
+pub(crate) const UNKNOWN_AUTHOR: &str = "Unknown Author";
 
 fn classify_subjects(subjects: &[String]) -> Category {
     let joined = subjects.join(" ").to_lowercase();
@@ -524,7 +537,16 @@ pub(crate) fn sample_books() -> Vec<(Book, Category)> {
 
 #[cfg(test)]
 mod tests {
-    use super::slugify;
+    use super::{is_placeholder_author, slugify};
+
+    #[test]
+    fn placeholder_author_detection() {
+        assert!(is_placeholder_author(""));
+        assert!(is_placeholder_author("Unknown"));
+        assert!(is_placeholder_author(" unknown author "));
+        assert!(!is_placeholder_author("Terry Pratchett"));
+        assert!(!is_placeholder_author("Anonymous"));
+    }
 
     #[test]
     fn slugify_transliterates_accents() {
