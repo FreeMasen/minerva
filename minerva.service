@@ -24,9 +24,9 @@ ExecStart=/usr/local/bin/minerva
 # --- Configuration ---------------------------------------------------------
 # OPDS_LIBRARY_DIR (a directory of EPUB files) is required — set it here or in
 # the env file. The catalog + user database lives in the state directory below.
-Environment=OPDS_LIBRARY_DIR=/srv/books
+Environment=OPDS_LIBRARY_DIR=/usr/share/books
 Environment=OPDS_DB=/var/lib/minerva/opds.db
-Environment=OPDS_BASE_URL=http://localhost:3000
+Environment=OPDS_BASE_URL=http://localhost:4343
 Environment=RUST_LOG=minerva=info,tower_http=info,warn
 EnvironmentFile=-/etc/minerva/minerva.env
 
@@ -43,7 +43,7 @@ Restart=on-failure
 RestartSec=5
 
 # --- Hardening -------------------------------------------------------------
-# The server binds an unprivileged port (3000) and needs no capabilities.
+# The server binds an unprivileged port and needs no capabilities.
 # If you serve on a privileged port (e.g. 80/443), add:
 #   AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=
@@ -53,7 +53,7 @@ ProtectSystem=strict
 ProtectHome=read-only
 # The state dir (database) is writable; add the library dir too if you want
 # admin uploads to work (it must match OPDS_LIBRARY_DIR).
-ReadWritePaths=/var/lib/minerva /srv/books
+ReadWritePaths=/var/lib/minerva /usr/share/books
 PrivateTmp=true
 PrivateDevices=true
 ProtectClock=true
