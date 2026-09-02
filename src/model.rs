@@ -287,10 +287,7 @@ pub struct LinkProperties {
     pub number_of_items: Option<u64>,
 
     /// Description of the format obtained after an intermediate acquisition step.
-    #[serde(
-        rename = "indirectAcquisition",
-        skip_serializing_if = "Vec::is_empty"
-    )]
+    #[serde(rename = "indirectAcquisition", skip_serializing_if = "Vec::is_empty")]
     pub indirect_acquisition: Vec<IndirectAcquisition>,
 
     // --- Library lending (an OPDS extension, not part of core OPDS 2.0) ---

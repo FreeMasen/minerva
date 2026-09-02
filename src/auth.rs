@@ -63,12 +63,14 @@ impl AuthStore {
     /// even for unknown users so response timing doesn't reveal which usernames
     /// exist.
     pub async fn verify(&self, username: &str, password: &str) -> bool {
-        let stored: Option<String> =
-            sqlx::query_scalar!("SELECT password_hash FROM users WHERE username = ?", username)
-                .fetch_optional(&self.pool)
-                .await
-                .ok()
-                .flatten();
+        let stored: Option<String> = sqlx::query_scalar!(
+            "SELECT password_hash FROM users WHERE username = ?",
+            username
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten();
 
         let password = password.to_string();
         tokio::task::spawn_blocking(move || match stored {

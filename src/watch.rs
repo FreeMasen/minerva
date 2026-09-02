@@ -31,9 +31,7 @@ pub fn spawn(dir: PathBuf, store: Arc<CatalogStore>) -> anyhow::Result<()> {
     let mut debouncer = new_debouncer(DEBOUNCE, None, move |result| {
         let _ = tx.send(result);
     })?;
-    debouncer
-        .watcher()
-        .watch(&dir, RecursiveMode::Recursive)?;
+    debouncer.watcher().watch(&dir, RecursiveMode::Recursive)?;
     // Seed the rename-tracking cache so directory renames are reported.
     debouncer.cache().add_root(&dir, RecursiveMode::Recursive);
     tracing::info!(dir = %dir.display(), "watching library directory for changes");

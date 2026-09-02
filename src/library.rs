@@ -315,7 +315,11 @@ impl CatalogStore {
 
     /// Assign a category (by human-readable name) to a book, creating the
     /// category on demand. Returns the stored category.
-    pub async fn assign_category(&self, book_id: &str, name: &str) -> Result<Category, sqlx::Error> {
+    pub async fn assign_category(
+        &self,
+        book_id: &str,
+        name: &str,
+    ) -> Result<Category, sqlx::Error> {
         let category = Category::new(catalog::slugify(name), name.trim());
         self.seed_category(book_id, &category).await?;
         Ok(self
@@ -368,7 +372,12 @@ impl CatalogStore {
         .await
         .map(|rows| {
             rows.into_iter()
-                .map(|r| (Category::new(catalog::slugify(&r.author), r.author), r.count as u64))
+                .map(|r| {
+                    (
+                        Category::new(catalog::slugify(&r.author), r.author),
+                        r.count as u64,
+                    )
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -551,13 +560,15 @@ impl CatalogStore {
         let book_id = match existing {
             Some(record) => {
                 if rank > record.meta_rank {
-                    self.write_metadata(&record.id, &meta, &title, &author, rank).await;
+                    self.write_metadata(&record.id, &meta, &title, &author, rank)
+                        .await;
                 }
                 record.id
             }
             None => {
                 let id = self.free_id(&catalog::slugify(&title)).await;
-                self.create_book(&id, &work, &meta, &title, &author, rank).await;
+                self.create_book(&id, &work, &meta, &title, &author, rank)
+                    .await;
                 let category = catalog::derive_category(dir, path, &meta.subjects);
                 if let Err(err) = self.seed_category(&id, &category).await {
                     tracing::error!(?err, id, "failed to seed book category");

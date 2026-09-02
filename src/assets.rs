@@ -35,8 +35,7 @@ pub fn epub_bytes(book: &Book) -> Vec<u8> {
         zip.write_all(b"application/epub+zip")
             .expect("write mimetype");
 
-        let deflated =
-            SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
         for (name, contents) in [
             ("META-INF/container.xml", CONTAINER_XML.to_string()),
             ("OEBPS/content.opf", content_opf(book)),

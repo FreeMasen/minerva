@@ -259,10 +259,7 @@ fn classify_subjects(subjects: &[String]) -> Category {
     ];
     if NONFICTION_HINTS.iter().any(|h| joined.contains(h)) {
         Category::new("nonfiction", "Non-Fiction")
-    } else if joined.contains("fiction")
-        || joined.contains("novel")
-        || joined.contains("stories")
-    {
+    } else if joined.contains("fiction") || joined.contains("novel") || joined.contains("stories") {
         Category::new("fiction", "Fiction")
     } else {
         Category::new("nonfiction", "Non-Fiction")
@@ -554,7 +551,10 @@ mod tests {
         assert_eq!(slugify("Naïve Café"), "naive-cafe");
         assert_eq!(slugify("Œuvres complètes"), "oeuvres-completes");
         // Plain ASCII is unchanged; runs of punctuation collapse to one dash.
-        assert_eq!(slugify("Moby-Dick; or, The Whale"), "moby-dick-or-the-whale");
+        assert_eq!(
+            slugify("Moby-Dick; or, The Whale"),
+            "moby-dick-or-the-whale"
+        );
         // Empty/blank input still yields a usable slug.
         assert_eq!(slugify(""), "book");
         assert_eq!(slugify("   "), "book");

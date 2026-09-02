@@ -42,9 +42,8 @@ pub struct EpubMeta {
 pub fn read_meta(path: &Path) -> io::Result<EpubMeta> {
     let mut zip = ZipArchive::new(File::open(path)?)?;
     let container = read_entry_string(&mut zip, "META-INF/container.xml")?;
-    let opf_path = opf_path(&container).ok_or_else(|| {
-        io::Error::new(ErrorKind::InvalidData, "container.xml has no rootfile")
-    })?;
+    let opf_path = opf_path(&container)
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "container.xml has no rootfile"))?;
     let opf = read_entry_string(&mut zip, &opf_path)?;
     parse_opf(&opf, &opf_path).map_err(|e| io::Error::new(ErrorKind::InvalidData, e))
 }
@@ -60,10 +59,7 @@ pub fn read_entry(path: &Path, name: &str) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn read_entry_string<R: Read + Seek>(
-    zip: &mut ZipArchive<R>,
-    name: &str,
-) -> io::Result<String> {
+fn read_entry_string<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str) -> io::Result<String> {
     let mut entry = zip
         .by_name(name)
         .map_err(|e| io::Error::new(ErrorKind::NotFound, format!("{name}: {e}")))?;
@@ -143,10 +139,10 @@ fn parse_opf(opf: &str, opf_path: &str) -> Result<EpubMeta, String> {
             // `dc:date` is a fallback; `dcterms:modified` (below) wins.
             "date" if meta.modified.is_none() => meta.modified = text(n),
             "meta" => {
-                if n.attribute("property") == Some("dcterms:modified") {
-                    if let Some(t) = text(n) {
-                        meta.modified = Some(t);
-                    }
+                if n.attribute("property") == Some("dcterms:modified")
+                    && let Some(t) = text(n)
+                {
+                    meta.modified = Some(t);
                 }
                 if n.attribute("name") == Some("cover") {
                     cover_meta_id = n.attribute("content").map(str::to_string);
@@ -160,10 +156,10 @@ fn parse_opf(opf: &str, opf_path: &str) -> Result<EpubMeta, String> {
                     }
                     _ => {}
                 }
-                if n.attribute("property") == Some("belongs-to-collection") {
-                    if let Some(name) = text(n) {
-                        collections.push((n.attribute("id").map(str::to_string), name));
-                    }
+                if n.attribute("property") == Some("belongs-to-collection")
+                    && let Some(name) = text(n)
+                {
+                    collections.push((n.attribute("id").map(str::to_string), name));
                 }
                 if let Some(refines) = n.attribute("refines") {
                     let target = refines.trim_start_matches('#').to_string();
@@ -201,13 +197,12 @@ fn parse_opf(opf: &str, opf_path: &str) -> Result<EpubMeta, String> {
     }
 
     // EPUB2 fallback: resolve the <meta name="cover"> id against the manifest.
-    if cover.is_none() {
-        if let Some(id) = cover_meta_id {
-            if let Some((href, mt)) = items.get(id.as_str()) {
-                cover = Some(((*href).to_string(), (*mt).to_string()));
-            }
+    if cover.is_none()
+        && let Some(id) = cover_meta_id
+            && let Some((href, mt)) = items.get(id.as_str())
+        {
+            cover = Some(((*href).to_string(), (*mt).to_string()));
         }
-    }
 
     // Series: prefer an EPUB3 collection typed "series" (or an untyped one),
     // otherwise fall back to the flat Calibre metadata.
@@ -219,7 +214,10 @@ fn parse_opf(opf: &str, opf_path: &str) -> Result<EpubMeta, String> {
     });
     if let Some((id, name)) = epub3_series {
         meta.series = Some(name.clone());
-        meta.series_index = id.as_deref().and_then(|i| collection_position.get(i)).copied();
+        meta.series_index = id
+            .as_deref()
+            .and_then(|i| collection_position.get(i))
+            .copied();
     } else {
         meta.series = calibre_series;
         meta.series_index = calibre_series_index;
@@ -270,12 +268,13 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(b);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+        {
+            out.push(b);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;

@@ -154,7 +154,10 @@ async fn set_properties(
         true => None,
         false => match series_index.parse::<f64>() {
             Ok(n) => Some(n),
-            Err(_) => return (StatusCode::BAD_REQUEST, "Series number must be a number.").into_response(),
+            Err(_) => {
+                return (StatusCode::BAD_REQUEST, "Series number must be a number.")
+                    .into_response();
+            }
         },
     };
     let _ = state.catalog.set_title(&id, title).await;
@@ -202,7 +205,11 @@ async fn remove_book(State(state): State<Arc<AppState>>, Path(id): Path<String>)
 /// Save an uploaded EPUB into the library directory and reconcile.
 async fn upload(State(state): State<Arc<AppState>>, mut multipart: Multipart) -> Response {
     let Some(dir) = state.library_dir.clone() else {
-        return (StatusCode::BAD_REQUEST, "uploads require a library directory").into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            "uploads require a library directory",
+        )
+            .into_response();
     };
 
     while let Ok(Some(field)) = multipart.next_field().await {

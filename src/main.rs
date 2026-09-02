@@ -33,6 +33,7 @@ mod assets;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
+use anyhow::Context;
 use axum::{
     Json, Router,
     extract::{Path, Query, Request, State},
@@ -41,7 +42,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get},
 };
-use anyhow::Context;
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
@@ -56,7 +56,12 @@ use crate::model::*;
 #[command(name = "minerva", version, about)]
 struct Cli {
     /// Externally-visible base URL used to build absolute hrefs.
-    #[arg(long, short = 'u', env = "OPDS_BASE_URL", default_value = "http://localhost:3000")]
+    #[arg(
+        long,
+        short = 'u',
+        env = "OPDS_BASE_URL",
+        default_value = "http://localhost:3000"
+    )]
     base_url: String,
 
     /// SQLite database holding the catalog and user accounts.
@@ -506,14 +511,20 @@ async fn root_feed(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     }
     let authors = state.catalog.authors().await;
     if !authors.is_empty() {
-        feed.groups.push(browse_group(base, "Browse by Author", "authors", authors));
+        feed.groups
+            .push(browse_group(base, "Browse by Author", "authors", authors));
     }
 
     Opds::feed(feed)
 }
 
 /// A navigation group of `subsection` links to `{base}/opds/{segment}/{slug}`.
-fn browse_group(base: &str, title: &str, segment: &str, entries: Vec<(catalog::Category, u64)>) -> Group {
+fn browse_group(
+    base: &str,
+    title: &str,
+    segment: &str,
+    entries: Vec<(catalog::Category, u64)>,
+) -> Group {
     Group {
         metadata: Metadata::new(title),
         links: Vec::new(),
@@ -594,10 +605,7 @@ async fn all_publications(
 }
 
 /// An acquisition feed filtered to a single category.
-async fn category_feed(
-    State(state): State<Arc<AppState>>,
-    Path(slug): Path<String>,
-) -> Response {
+async fn category_feed(State(state): State<Arc<AppState>>, Path(slug): Path<String>) -> Response {
     let base = &state.base_url;
 
     let Some(category) = state.catalog.category(&slug).await else {
@@ -606,20 +614,17 @@ async fn category_feed(
 
     let books = state.catalog.books_in_category(&slug).await;
 
-    let mut feed = Feed::new(
-        category.label,
-        format!("{base}/opds/category/{slug}"),
-    )
-    .with_link(
-        Link::new(format!("{base}/opds"))
-            .with_rel("start")
-            .with_type(FEED_MEDIA_TYPE),
-    )
-    .with_link(
-        Link::new(format!("{base}/opds/all"))
-            .with_rel("up")
-            .with_type(FEED_MEDIA_TYPE),
-    );
+    let mut feed = Feed::new(category.label, format!("{base}/opds/category/{slug}"))
+        .with_link(
+            Link::new(format!("{base}/opds"))
+                .with_rel("start")
+                .with_type(FEED_MEDIA_TYPE),
+        )
+        .with_link(
+            Link::new(format!("{base}/opds/all"))
+                .with_rel("up")
+                .with_type(FEED_MEDIA_TYPE),
+        );
 
     feed.metadata.number_of_items = Some(books.len() as u64);
     feed.publications = books.iter().map(|b| b.to_publication(base)).collect();
@@ -655,10 +660,7 @@ async fn author_feed(State(state): State<Arc<AppState>>, Path(slug): Path<String
 }
 
 /// A single publication document.
-async fn publication(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Response {
+async fn publication(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     match state.catalog.get(&id).await {
         Some(book) => Opds::publication(book.to_publication(&state.base_url)).into_response(),
         None => not_found("No such publication"),
@@ -686,8 +688,18 @@ async fn search(
     let base = &state.base_url;
 
     let query = params.query.trim().to_lowercase();
-    let author = params.author.as_deref().unwrap_or_default().trim().to_lowercase();
-    let title = params.title.as_deref().unwrap_or_default().trim().to_lowercase();
+    let author = params
+        .author
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
+    let title = params
+        .title
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
 
     let matches = state.catalog.search(&query, &author, &title).await;
 
@@ -854,10 +866,8 @@ async fn serve_cover(state: Arc<AppState>, id: String, thumbnail: bool) -> Respo
         // async runtime — both zip reads and image decoding are blocking.
         let read = tokio::task::spawn_blocking(move || {
             let bytes = epub::read_entry(&path, &zip_path)?;
-            if thumbnail {
-                if let Some(thumb) = covers::thumbnail(&bytes, 160, 240) {
-                    return Ok((thumb, "image/jpeg".to_string()));
-                }
+            if thumbnail && let Some(thumb) = covers::thumbnail(&bytes, 160, 240) {
+                return Ok((thumb, "image/jpeg".to_string()));
             }
             Ok::<_, std::io::Error>((bytes, media_type))
         })
@@ -934,7 +944,11 @@ async fn assign_category(
     }
     if let Err(err) = state.catalog.assign_category(&id, name).await {
         tracing::error!(?err, id, "failed to assign category");
-        return (StatusCode::INTERNAL_SERVER_ERROR, "failed to assign category").into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to assign category",
+        )
+            .into_response();
     }
     Json(state.catalog.book_categories(&id).await).into_response()
 }
@@ -1119,7 +1133,13 @@ mod tests {
         let new = group("New Publications");
         assert_eq!(new["metadata"]["numberOfItems"], 5);
         assert!(!new["publications"].as_array().unwrap().is_empty());
-        assert!(new["links"].as_array().unwrap().iter().any(|l| l["rel"] == "self"));
+        assert!(
+            new["links"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|l| l["rel"] == "self")
+        );
 
         // Navigation groups over the two genre categories and the five authors.
         let by_category = group("Browse by Category");
@@ -1161,7 +1181,10 @@ mod tests {
         assert_eq!(props["copies"]["total"], 3);
         assert_eq!(props["copies"]["available"], 2);
         assert_eq!(props["holds"]["total"], 1);
-        assert_eq!(props["indirectAcquisition"][0]["type"], "application/epub+zip");
+        assert_eq!(
+            props["indirectAcquisition"][0]["type"],
+            "application/epub+zip"
+        );
 
         // A lendable title has no buy or open-access link, and its download
         // endpoint refuses.
@@ -1199,7 +1222,10 @@ mod tests {
         // Title-only filter.
         let (_, _, json) = get("/opds/search?title=war").await;
         assert_eq!(json["metadata"]["numberOfItems"], 1);
-        assert_eq!(json["publications"][0]["metadata"]["title"], "The Art of War");
+        assert_eq!(
+            json["publications"][0]["metadata"]["title"],
+            "The Art of War"
+        );
 
         // A query and an author filter that disagree yield nothing.
         let (_, _, json) = get("/opds/search?query=whale&author=austen").await;
@@ -1303,8 +1329,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_access_download_serves_an_epub() {
-        let (status, content_type, headers, bytes) =
-            get_raw("/opds/download/moby-dick.epub").await;
+        let (status, content_type, headers, bytes) = get_raw("/opds/download/moby-dick.epub").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(content_type, "application/epub+zip");
         assert_eq!(
@@ -1549,8 +1574,7 @@ mod tests {
     async fn placeholder_author_is_normalized() {
         use std::fs;
 
-        let dir =
-            std::env::temp_dir().join(format!("opds-unknown-author-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("opds-unknown-author-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
@@ -1602,7 +1626,10 @@ mod tests {
         assert!(!store.verify("nobody", "correct horse").await);
 
         // add_user upserts: the password can be changed in place.
-        store.add_user("alice", "new passphrase", None).await.unwrap();
+        store
+            .add_user("alice", "new passphrase", None)
+            .await
+            .unwrap();
         assert_eq!(store.user_count().await, 1);
         assert!(store.verify("alice", "new passphrase").await);
         assert!(!store.verify("alice", "correct horse").await);
@@ -1666,7 +1693,12 @@ mod tests {
     async fn auth_document_is_reachable_without_credentials() {
         let response = test_app_with_auth()
             .await
-            .oneshot(Request::builder().uri("/opds/auth").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/opds/auth")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -1690,7 +1722,11 @@ mod tests {
         let fiction = samples.get("moby-dick").await.unwrap();
         let nonfiction = samples.get("the-art-of-war").await.unwrap();
         fs::write(dir.join("Fiction/a.epub"), assets::epub_bytes(&fiction)).unwrap();
-        fs::write(dir.join("Non-Fiction/b.epub"), assets::epub_bytes(&nonfiction)).unwrap();
+        fs::write(
+            dir.join("Non-Fiction/b.epub"),
+            assets::epub_bytes(&nonfiction),
+        )
+        .unwrap();
 
         let store = CatalogStore::new(db::connect_memory().await.unwrap());
         store.reconcile_dir(&dir).await;
@@ -1745,7 +1781,13 @@ mod tests {
         assert_eq!(slugs, ["fiction", "sea-stories"]); // ordered by label
 
         // It now shows up in the (non-empty) category listing.
-        assert!(store.categories().await.iter().any(|(c, n)| c.slug.as_str() == "sea-stories" && *n == 1));
+        assert!(
+            store
+                .categories()
+                .await
+                .iter()
+                .any(|(c, n)| c.slug.as_str() == "sea-stories" && *n == 1)
+        );
         assert_eq!(store.books_in_category("sea-stories").await.len(), 1);
 
         // Removing it is reflected, and a second remove is a no-op.
@@ -1766,8 +1808,12 @@ mod tests {
         let app = test_app().await;
 
         let get = |uri: &str| {
-            app.clone()
-                .oneshot(Request::builder().uri(uri.to_string()).body(Body::empty()).unwrap())
+            app.clone().oneshot(
+                Request::builder()
+                    .uri(uri.to_string())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
         };
         let post = |uri: &str, body: &'static str| {
             app.clone().oneshot(
@@ -1789,9 +1835,12 @@ mod tests {
         assert!(html.contains("Moby-Dick"));
 
         // Editing properties updates the publication (AJAX: 200, no redirect).
-        let response = post("/admin/books/moby-dick/properties", "title=Renamed&author=Someone")
-            .await
-            .unwrap();
+        let response = post(
+            "/admin/books/moby-dick/properties",
+            "title=Renamed&author=Someone",
+        )
+        .await
+        .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let response = get("/opds/publications/moby-dick").await.unwrap();
         let json: Value =
