@@ -47,7 +47,7 @@
     {% for book in books %}
     <tr>
       <td>
-        <form onsubmit="return save_properties(this)">
+        <form onsubmit="save_properties(event, this)">
           <input name="title" value="{{ book.title }}" aria-label="title">
           <input name="author" value="{{ book.author }}" aria-label="author">
           <input name="series" value="{{ book.series | default(value='') }}"
@@ -65,7 +65,7 @@
                     onclick="remove_category(this)">&times;</button>
           </span>
           {% endfor %}
-          <form class="chip" onsubmit="return add_category(this)">
+          <form class="chip" onsubmit="add_category(event, this)">
             <input name="name" placeholder="add category" aria-label="add category">
             <button data-book-id="{{ book.id }}">+</button>
           </form>
@@ -120,13 +120,16 @@
       return chip;
     }
 
-    async function save_properties(form) {
+    // These are form submit handlers: cancel the native submission first (before
+    // any await), or the browser navigates away and aborts the fetch below.
+    async function save_properties(event, form) {
+      event.preventDefault();
       const id = form.querySelector("button").dataset.bookId;
       await post(`/admin/books/${encodeURIComponent(id)}/properties`, form);
-      return false;
     }
 
-    async function add_category(form) {
+    async function add_category(event, form) {
+      event.preventDefault();
       const id = form.querySelector("button").dataset.bookId;
       const resp = await post(`/admin/books/${encodeURIComponent(id)}/categories`, form);
       // The server returns the canonical (slugified) category, so the chip's
@@ -134,7 +137,6 @@
       const category = await resp.json();
       form.insertAdjacentElement("beforebegin", makeChip(id, category));
       form.reset();
-      return false;
     }
 
     async function remove_category(btn) {
