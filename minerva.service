@@ -31,6 +31,9 @@ Environment=OPDS_BASE_URL=http://minerva.lan
 # The internal address the server binds; the reverse proxy forwards here.
 Environment=OPDS_LISTEN=127.0.0.1:4343
 Environment=RUST_LOG=minerva=info,tower_http=info,warn
+# Max admin upload size (MiB). Keep this <= any reverse proxy's body limit
+# (nginx: client_max_body_size). Default is 64.
+Environment=OPDS_MAX_UPLOAD_MIB=128
 EnvironmentFile=-/etc/minerva/minerva.env
 
 # --- Identity & state ------------------------------------------------------

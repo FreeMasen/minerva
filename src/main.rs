@@ -82,6 +82,11 @@ struct Cli {
     #[arg(long, short, env = "OPDS_LIBRARY_DIR")]
     library_dir: Option<PathBuf>,
 
+    /// Maximum admin upload size, in MiB. Keep this at or below any reverse
+    /// proxy's body limit (e.g. nginx `client_max_body_size`).
+    #[arg(long, env = "OPDS_MAX_UPLOAD_MIB", default_value_t = 64)]
+    max_upload_mib: usize,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -123,6 +128,8 @@ struct AppState {
     auth: Option<Arc<AuthStore>>,
     /// The watched library directory, if any (target for admin uploads).
     library_dir: Option<PathBuf>,
+    /// Upper bound on the body of an admin upload request, in bytes.
+    max_upload_bytes: usize,
 }
 
 #[tokio::main]
@@ -231,6 +238,7 @@ async fn run_server(cli: Cli) -> anyhow::Result<()> {
         catalog,
         auth,
         library_dir: Some(library_dir),
+        max_upload_bytes: cli.max_upload_mib * 1024 * 1024,
     });
 
     let listener = tokio::net::TcpListener::bind(addr)
@@ -311,7 +319,7 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/opds/borrow/{id}", get(borrow))
         .route("/opds/covers/{id}", get(cover))
         .route("/opds/covers/{id}/thumb", get(cover_thumb))
-        .merge(admin::routes())
+        .merge(admin::routes(state.max_upload_bytes))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     // The redirect and the authentication document must stay reachable
@@ -1023,6 +1031,7 @@ mod tests {
             catalog: sample_store().await,
             auth: None,
             library_dir: None,
+            max_upload_bytes: 64 * 1024 * 1024,
         }))
     }
 
@@ -1039,6 +1048,7 @@ mod tests {
             catalog: Arc::new(catalog),
             auth: Some(Arc::new(users)),
             library_dir: None,
+            max_upload_bytes: 64 * 1024 * 1024,
         }))
     }
 
@@ -1563,6 +1573,7 @@ mod tests {
             catalog: Arc::new(store),
             auth: None,
             library_dir: Some(dir.clone()),
+            max_upload_bytes: 64 * 1024 * 1024,
         }));
 
         // The publication advertises one open-access link per format.

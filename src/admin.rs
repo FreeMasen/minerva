@@ -7,7 +7,7 @@ use std::sync::{Arc, LazyLock};
 
 use axum::{
     Form, Json, Router,
-    extract::{Multipart, Path, Query, State},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     http::StatusCode,
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
@@ -26,10 +26,17 @@ static TEMPLATES: LazyLock<tera::Tera> = LazyLock::new(|| {
 });
 
 /// The admin routes (merged into the protected router).
-pub fn routes() -> Router<Arc<AppState>> {
+///
+/// `max_upload_bytes` raises axum's 2 MiB default body limit for the upload
+/// route only; EPUBs routinely exceed it, and hitting it surfaces as an opaque
+/// `MultipartError` mid-stream.
+pub fn routes(max_upload_bytes: usize) -> Router<Arc<AppState>> {
     Router::new()
         .route("/admin", get(page))
-        .route("/admin/upload", post(upload))
+        .route(
+            "/admin/upload",
+            post(upload).layer(DefaultBodyLimit::max(max_upload_bytes)),
+        )
         .route("/admin/books/{id}/properties", post(set_properties))
         .route("/admin/books/{id}/categories", post(add_category))
         .route(
@@ -223,7 +230,11 @@ async fn upload(State(state): State<Arc<AppState>>, mut multipart: Multipart) ->
             Ok(data) => data,
             Err(err) => {
                 tracing::warn!(?err, "failed to read uploaded file");
-                continue;
+                return (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "failed to read uploaded file (too large, or the connection dropped)",
+                )
+                    .into_response();
             }
         };
         if let Err(err) = tokio::fs::write(dir.join(&filename), data).await {
