@@ -212,15 +212,14 @@ async fn run_server(cli: Cli) -> anyhow::Result<()> {
     if let Err(err) = watch::spawn(library_dir.clone(), catalog.clone()) {
         tracing::warn!(?err, "failed to start the library watcher");
     }
-
+    let addr = cli.base_url.strip_prefix("http://").or_else(|| cli.base_url.strip_prefix("https://")).unwrap_or(cli.base_url.as_str());
     let state = Arc::new(AppState {
-        base_url: cli.base_url,
+        base_url: cli.base_url.clone(),
         catalog,
         auth,
         library_dir: Some(library_dir),
     });
 
-    let addr = "0.0.0.0:3000";
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding {addr}"))?;
