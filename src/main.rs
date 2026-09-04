@@ -30,6 +30,7 @@ mod xtc;
 #[cfg(test)]
 mod assets;
 
+use std::net::SocketAddr;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
@@ -63,6 +64,11 @@ struct Cli {
         default_value = "http://localhost:3000"
     )]
     base_url: String,
+
+    /// Socket address to bind (host:port). Typically an internal address
+    /// behind a reverse proxy; distinct from the externally-visible base URL.
+    #[arg(long, short = 'l', env = "OPDS_LISTEN", default_value = "0.0.0.0:3000")]
+    listen: SocketAddr,
 
     /// SQLite database holding the catalog and user accounts.
     #[arg(long, short, env = "OPDS_DB", default_value = "opds.db", global = true)]
@@ -212,9 +218,9 @@ async fn run_server(cli: Cli) -> anyhow::Result<()> {
     if let Err(err) = watch::spawn(library_dir.clone(), catalog.clone()) {
         tracing::warn!(?err, "failed to start the library watcher");
     }
-    let addr = cli.base_url.strip_prefix("http://").or_else(|| cli.base_url.strip_prefix("https://")).unwrap_or(cli.base_url.as_str());
+    let addr = cli.listen;
     let state = Arc::new(AppState {
-        base_url: cli.base_url.clone(),
+        base_url: cli.base_url,
         catalog,
         auth,
         library_dir: Some(library_dir),

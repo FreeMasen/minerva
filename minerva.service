@@ -26,7 +26,10 @@ ExecStart=/usr/local/bin/minerva
 # the env file. The catalog + user database lives in the state directory below.
 Environment=OPDS_LIBRARY_DIR=/usr/share/books
 Environment=OPDS_DB=/var/lib/minerva/opds.db
-Environment=OPDS_BASE_URL=http://localhost:4343
+# The externally-visible URL clients see (behind the reverse proxy).
+Environment=OPDS_BASE_URL=http://minerva.lan
+# The internal address the server binds; the reverse proxy forwards here.
+Environment=OPDS_LISTEN=127.0.0.1:4343
 Environment=RUST_LOG=minerva=info,tower_http=info,warn
 EnvironmentFile=-/etc/minerva/minerva.env
 
