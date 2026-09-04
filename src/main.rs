@@ -1082,6 +1082,7 @@ mod tests {
             catalog: sample_store().await,
             auth: None,
             library_dir: None,
+            max_upload_bytes: 64 * 1024 * 1024,
         }));
         let response = app
             .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())

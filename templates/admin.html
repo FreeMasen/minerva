@@ -5,83 +5,194 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>minerva admin</title>
   <style>
-    body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 64rem; }
-    table { border-collapse: collapse; width: 100%; }
-    th, td { border-top: 1px solid #ddd; padding: .5rem; vertical-align: top; text-align: left; }
-    input { margin: .1rem; }
-    .cats { margin-top: .4rem; }
-    .chip { display: inline-flex; align-items: center; gap: .25rem; background: #eee;
-            border-radius: 1rem; padding: .1rem .5rem; margin: .1rem; }
-    .chip button { border: none; background: none; cursor: pointer; padding: 0; }
-    .chip input { border: none; background: none; width: 8rem; }
-    .downloads a { margin-right: .5rem; }
+    :root {
+      --bg: #16171c; --bg-elev: #1f2029; --bg-elev-2: #272838; --border: #33344a;
+      --text: #e7e7ef; --text-dim: #a2a3b4; --accent: #8b7bf5; --accent-contrast: #fff;
+      --danger: #f2708a; --radius: 10px; --shadow: 0 6px 24px rgba(0, 0, 0, .35);
+      color-scheme: dark;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    }
+    a { color: var(--accent); }
+    .wrap { max-width: 1000px; margin: 0 auto; padding: clamp(16px, 3vw, 28px); }
+
+    header h1 { font-size: 1.5rem; margin: 0 0 4px; }
+    header h1 .owl { margin-right: .4rem; }
+    .muted { color: var(--text-dim); }
+
+    /* inputs / buttons */
+    input, select {
+      font: inherit; color: var(--text); background: var(--bg);
+      border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+    }
+    input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+    input::placeholder { color: var(--text-dim); }
+    .btn {
+      font: inherit; font-weight: 600; cursor: pointer;
+      color: var(--text); background: var(--bg-elev-2);
+      border: 1px solid var(--border); border-radius: 8px; padding: 8px 14px;
+      transition: border-color .15s, background .15s;
+    }
+    .btn:hover { border-color: var(--accent); }
+    .btn-primary { background: var(--accent); color: var(--accent-contrast); border-color: transparent; }
+    .btn-danger { color: var(--danger); }
+    .btn-danger:hover { border-color: var(--danger); }
+
+    /* upload */
+    .panel {
+      background: var(--bg-elev); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 16px; margin: 16px 0;
+    }
+    .panel h2 { font-size: 1rem; margin: 0 0 10px; }
+    .upload { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+
+    /* error banner */
     #error-message:empty { display: none; }
-    #error-message { position: sticky; top: 0; background: #fdd; color: #900;
-                     padding: .5rem; border-radius: .25rem; margin: .5rem 0; }
+    #error-message {
+      position: sticky; top: 0; z-index: 5; margin: 12px 0;
+      background: color-mix(in srgb, var(--danger) 18%, var(--bg-elev));
+      color: var(--danger); border: 1px solid var(--danger);
+      padding: 10px 12px; border-radius: 8px;
+    }
+
+    /* filter bar */
+    .filters {
+      position: sticky; top: 0; z-index: 4;
+      display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+      padding: 12px 0; margin-bottom: 8px;
+      background: linear-gradient(var(--bg) 70%, transparent);
+    }
+    .filters #f-search { flex: 1 1 220px; }
+    .filters select { flex: 0 1 auto; }
+    .filters #f-count { margin-left: auto; }
+
+    /* book cards */
+    .books { display: flex; flex-direction: column; gap: 12px; }
+    .book {
+      display: grid; grid-template-columns: 1fr auto; gap: 16px;
+      background: var(--bg-elev); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 14px 16px;
+    }
+    .book[hidden] { display: none; }
+    .props { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .props .title { flex: 1 1 240px; font-weight: 600; }
+    .props .author { flex: 1 1 180px; }
+    .props .series { flex: 1 1 140px; }
+    .props .idx { width: 4.5rem; }
+
+    .cats { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; align-items: center; }
+    .chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--bg-elev-2); border: 1px solid var(--border);
+      border-radius: 999px; padding: 3px 6px 3px 12px; font-size: .9rem;
+    }
+    .chip button { border: none; background: none; color: var(--text-dim); cursor: pointer; padding: 0 4px; font-size: 1rem; }
+    .chip button:hover { color: var(--danger); }
+    .chip-add { padding: 2px; }
+    .chip-add input { border: none; background: none; width: 9rem; padding: 4px 6px; }
+    .chip-add button { color: var(--accent); font-size: 1.1rem; }
+
+    .book-side {
+      display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
+      text-align: right; min-width: 0;
+    }
+    .downloads { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .downloads a {
+      font-size: .8rem; font-weight: 600; text-decoration: none;
+      background: var(--bg-elev-2); border: 1px solid var(--border);
+      border-radius: 6px; padding: 3px 8px;
+    }
+    .book-id { color: var(--text-dim); font-size: .75rem; word-break: break-all; }
+
+    @media (max-width: 640px) {
+      .book { grid-template-columns: 1fr; }
+      .book-side { align-items: flex-start; text-align: left; }
+      .downloads { justify-content: flex-start; }
+    }
   </style>
 </head>
 <body>
+<div class="wrap">
   <header>
-    <h1>minerva — catalog admin</h1>
+    <h1><span class="owl">🦉</span>minerva — catalog admin</h1>
     <p id="error-message"></p>
-    <h2>Upload</h2>
-    {% if has_library %}
-    <form method="post" action="/admin/upload" enctype="multipart/form-data">
-      <input type="file" name="file" accept=".epub" required>
-      <button>Upload EPUB</button>
-    </form>
-    {% else %}
-    <p><em>Set <code>OPDS_LIBRARY_DIR</code> to enable uploads.</em></p>
-    {% endif %}
   </header>
 
+  <section class="panel">
+    <h2>Upload</h2>
+    {% if has_library %}
+    <form class="upload" method="post" action="/admin/upload" enctype="multipart/form-data">
+      <input type="file" name="file" accept=".epub" required>
+      <button class="btn btn-primary">Upload EPUB</button>
+    </form>
+    {% else %}
+    <p class="muted">Set <code>OPDS_LIBRARY_DIR</code> to enable uploads.</p>
+    {% endif %}
+  </section>
+
   <main>
-  <h2>Books ({{ count }})</h2>
-  {% if unknown_only %}
-  <p><a href="/admin">Show all books</a> — listing {{ count }} with no author.</p>
-  {% elif unknown_count > 0 %}
-  <p><a href="/admin?unknown=1">Show only the {{ unknown_count }} book(s) needing an author</a></p>
-  {% endif %}
-  <table>
-    <tr><th>Title / author / categories</th><th>Download</th><th>id</th><th></th></tr>
-    {% for book in books %}
-    <tr>
-      <td>
-        <form onsubmit="save_properties(event, this)">
-          <input name="title" value="{{ book.title }}" aria-label="title">
-          <input name="author" value="{{ book.author }}" aria-label="author">
-          <input name="series" value="{{ book.series | default(value='') }}"
-                 placeholder="series" aria-label="series">
-          <input name="series_index" value="{{ book.series_index | default(value='') }}"
-                 placeholder="#" aria-label="series number" size="4" inputmode="decimal">
-          <button data-book-id="{{ book.id }}">Save</button>
-        </form>
-        <div class="cats">
-          {% for category in book.categories %}
-          <span class="chip">
-            <span>{{ category.label }}</span>
-            <button type="button" title="remove"
-                    data-book-id="{{ book.id }}" data-category-slug="{{ category.slug }}"
-                    onclick="remove_category(this)">&times;</button>
-          </span>
-          {% endfor %}
-          <form class="chip" onsubmit="add_category(event, this)">
-            <input name="name" placeholder="add category" aria-label="add category">
-            <button data-book-id="{{ book.id }}">+</button>
+    <h2>Books ({{ count }})</h2>
+    {% if unknown_only %}
+    <p><a href="/admin">Show all books</a> — listing {{ count }} with no author.</p>
+    {% elif unknown_count > 0 %}
+    <p><a href="/admin?unknown=1">Show only the {{ unknown_count }} book(s) needing an author</a></p>
+    {% endif %}
+
+    <div class="filters">
+      <input id="f-search" type="search" placeholder="Search title, author, series, category…" aria-label="Search">
+      <select id="f-author" aria-label="Filter by author"><option value="">All authors</option></select>
+      <select id="f-series" aria-label="Filter by series"><option value="">All series</option></select>
+      <select id="f-category" aria-label="Filter by category"><option value="">All categories</option></select>
+      <span id="f-count" class="muted"></span>
+    </div>
+
+    <div class="books">
+      {% for book in books %}
+      <article class="book"
+               data-title="{{ book.title }}"
+               data-author="{{ book.author }}"
+               data-series="{{ book.series | default(value='') }}"
+               data-categories="|{% for category in book.categories %}{{ category.label }}|{% endfor %}">
+        <div class="book-main">
+          <form class="props" onsubmit="save_properties(event, this)">
+            <input class="title" name="title" value="{{ book.title }}" aria-label="title">
+            <input class="author" name="author" value="{{ book.author }}" placeholder="author" aria-label="author">
+            <input class="series" name="series" value="{{ book.series | default(value='') }}"
+                   placeholder="series" aria-label="series">
+            <input class="idx" name="series_index" value="{{ book.series_index | default(value='') }}"
+                   placeholder="#" aria-label="series number" inputmode="decimal">
+            <button class="btn" data-book-id="{{ book.id }}">Save</button>
           </form>
+          <div class="cats">
+            {% for category in book.categories %}
+            <span class="chip">
+              <span>{{ category.label }}</span>
+              <button type="button" title="remove"
+                      data-book-id="{{ book.id }}" data-category-slug="{{ category.slug }}"
+                      onclick="remove_category(this)">&times;</button>
+            </span>
+            {% endfor %}
+            <form class="chip chip-add" onsubmit="add_category(event, this)">
+              <input name="name" placeholder="add category" aria-label="add category">
+              <button class="btn" data-book-id="{{ book.id }}">+</button>
+            </form>
+          </div>
         </div>
-      </td>
-      <td class="downloads">
-        {% for d in book.downloads %}<a href="{{ d.href }}">{{ d.label }}</a>{% endfor %}
-      </td>
-      <td><code>{{ book.id }}</code></td>
-      <td>
-        <button type="button" data-book-id="{{ book.id }}" onclick="remove_book(this)">Remove</button>
-      </td>
-    </tr>
-    {% endfor %}
-  </table>
+        <aside class="book-side">
+          <div class="downloads">
+            {% for d in book.downloads %}<a href="{{ d.href }}">{{ d.label }}</a>{% endfor %}
+          </div>
+          <code class="book-id">{{ book.id }}</code>
+          <button type="button" class="btn btn-danger" data-book-id="{{ book.id }}" onclick="remove_book(this)">Remove</button>
+        </aside>
+      </article>
+      {% endfor %}
+    </div>
   </main>
+</div>
 
   <script>
     const errorBox = document.getElementById("error-message");
@@ -126,6 +237,12 @@
       event.preventDefault();
       const id = form.querySelector("button").dataset.bookId;
       await post(`/admin/books/${encodeURIComponent(id)}/properties`, form);
+      // Keep the row's filter data in sync with the edited values.
+      const card = form.closest(".book");
+      card.dataset.title = form.title.value;
+      card.dataset.author = form.author.value;
+      card.dataset.series = form.series.value;
+      rebuildFilters();
     }
 
     async function add_category(event, form) {
@@ -136,20 +253,93 @@
       // slug always matches what a later remove will send.
       const category = await resp.json();
       form.insertAdjacentElement("beforebegin", makeChip(id, category));
+      const card = form.closest(".book");
+      card.dataset.categories += `${category.label}|`;
       form.reset();
+      rebuildFilters();
     }
 
     async function remove_category(btn) {
       const { bookId, categorySlug } = btn.dataset;
       await post(`/admin/books/${encodeURIComponent(bookId)}/categories/${encodeURIComponent(categorySlug)}/delete`);
-      btn.closest(".chip").remove();
+      const chip = btn.closest(".chip");
+      const label = chip.querySelector("span").textContent;
+      const card = chip.closest(".book");
+      card.dataset.categories = card.dataset.categories.replace(`|${label}|`, "|");
+      chip.remove();
+      rebuildFilters();
     }
 
     async function remove_book(btn) {
       if (!confirm("Remove this book?")) return;
       await post(`/admin/books/${encodeURIComponent(btn.dataset.bookId)}/delete`);
-      btn.closest("tr").remove();
+      btn.closest(".book").remove();
+      rebuildFilters();
     }
+
+    // --- client-side filtering by search text, author, series, category -------
+
+    const cards = () => Array.from(document.querySelectorAll(".book"));
+    const fSearch = document.getElementById("f-search");
+    const fAuthor = document.getElementById("f-author");
+    const fSeries = document.getElementById("f-series");
+    const fCategory = document.getElementById("f-category");
+    const fCount = document.getElementById("f-count");
+
+    // Repopulate a <select> with the distinct, sorted values, preserving the
+    // current selection when still present.
+    function fillSelect(select, values, allLabel) {
+      const current = select.value;
+      const sorted = [...new Set(values.filter(Boolean))].sort((a, b) => a.localeCompare(b));
+      select.innerHTML = "";
+      const all = document.createElement("option");
+      all.value = ""; all.textContent = allLabel;
+      select.appendChild(all);
+      for (const v of sorted) {
+        const o = document.createElement("option");
+        o.value = v; o.textContent = v;
+        select.appendChild(o);
+      }
+      select.value = sorted.includes(current) ? current : "";
+    }
+
+    function categoriesOf(card) {
+      return card.dataset.categories.split("|").filter(Boolean);
+    }
+
+    function rebuildFilters() {
+      const list = cards();
+      fillSelect(fAuthor, list.map((c) => c.dataset.author), "All authors");
+      fillSelect(fSeries, list.map((c) => c.dataset.series), "All series");
+      fillSelect(fCategory, list.flatMap(categoriesOf), "All categories");
+      applyFilters();
+    }
+
+    function applyFilters() {
+      const q = fSearch.value.trim().toLowerCase();
+      const a = fAuthor.value, s = fSeries.value, c = fCategory.value;
+      let shown = 0;
+      for (const card of cards()) {
+        const d = card.dataset;
+        const matchQ = !q ||
+          d.title.toLowerCase().includes(q) ||
+          d.author.toLowerCase().includes(q) ||
+          d.series.toLowerCase().includes(q) ||
+          d.categories.toLowerCase().includes(q);
+        const matchA = !a || d.author === a;
+        const matchS = !s || d.series === s;
+        const matchC = !c || d.categories.includes(`|${c}|`);
+        const show = matchQ && matchA && matchS && matchC;
+        card.hidden = !show;
+        if (show) shown++;
+      }
+      fCount.textContent = `${shown} shown`;
+    }
+
+    for (const el of [fSearch, fAuthor, fSeries, fCategory]) {
+      el.addEventListener("input", applyFilters);
+    }
+    rebuildFilters();
   </script>
 </body>
 </html>
