@@ -12,8 +12,8 @@
 /// The HTTP Basic realm advertised to clients.
 const AUTH_REALM: &str = "OPDS catalog";
 
-/// Number of publications served per page in acquisition feeds.
-const PAGE_SIZE: u64 = 3;
+/// Default number of publications served per page in acquisition feeds.
+const DEFAULT_PAGE_SIZE: u64 = 25;
 
 mod admin;
 mod auth;
@@ -70,6 +70,10 @@ struct Cli {
     #[arg(long, short = 'l', env = "OPDS_LISTEN", default_value = "0.0.0.0:3000")]
     listen: SocketAddr,
 
+    /// Number of publications per page in acquisition feeds.
+    #[arg(long, env = "OPDS_PAGE_SIZE", default_value_t = DEFAULT_PAGE_SIZE)]
+    page_size: u64,
+
     /// SQLite database holding the catalog and user accounts.
     #[arg(long, short, env = "OPDS_DB", default_value = "opds.db", global = true)]
     db: PathBuf,
@@ -111,6 +115,8 @@ enum Command {
 struct AppState {
     /// The externally-visible base URL used to build absolute hrefs.
     base_url: String,
+    /// Number of publications per page in acquisition feeds.
+    page_size: u64,
     /// The SQLite-backed catalog, queried per request.
     catalog: Arc<CatalogStore>,
     /// The user store protecting the catalog, if configured.
@@ -221,6 +227,7 @@ async fn run_server(cli: Cli) -> anyhow::Result<()> {
     let addr = cli.listen;
     let state = Arc::new(AppState {
         base_url: cli.base_url,
+        page_size: cli.page_size,
         catalog,
         auth,
         library_dir: Some(library_dir),
@@ -450,7 +457,7 @@ async fn root_redirect() -> Response {
 async fn root_feed(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let base = &state.base_url;
     let total = state.catalog.count().await;
-    let recent = state.catalog.recent(PAGE_SIZE).await;
+    let recent = state.catalog.recent(state.page_size).await;
 
     let mut feed = Feed::new("Example OPDS Catalog", format!("{base}/opds"))
         .with_link(
@@ -558,13 +565,14 @@ async fn all_publications(
     Query(params): Query<PageParams>,
 ) -> impl IntoResponse {
     let base = &state.base_url;
+    let page_size = state.page_size;
     let total = state.catalog.count().await;
 
     // At least one page even when the catalog is empty.
-    let last_page = total.div_ceil(PAGE_SIZE).max(1);
+    let last_page = total.div_ceil(page_size).max(1);
     let page = params.page.unwrap_or(1).clamp(1, last_page);
 
-    let page_books = state.catalog.page(PAGE_SIZE, (page - 1) * PAGE_SIZE).await;
+    let page_books = state.catalog.page(page_size, (page - 1) * page_size).await;
 
     let page_href = |p: u64| format!("{base}/opds/all?page={p}");
 
@@ -601,7 +609,7 @@ async fn all_publications(
     }
 
     feed.metadata.number_of_items = Some(total);
-    feed.metadata.items_per_page = Some(PAGE_SIZE);
+    feed.metadata.items_per_page = Some(page_size);
     feed.metadata.current_page = Some(page);
     feed.publications = page_books.iter().map(|b| b.to_publication(base)).collect();
     feed.facets = vec![category_facet(base, &state.catalog).await];
@@ -1011,6 +1019,7 @@ mod tests {
     async fn test_app() -> Router {
         app(Arc::new(AppState {
             base_url: BASE.to_string(),
+            page_size: DEFAULT_PAGE_SIZE,
             catalog: sample_store().await,
             auth: None,
             library_dir: None,
@@ -1026,6 +1035,7 @@ mod tests {
         users.add_user("admin", "secret", None).await.unwrap();
         app(Arc::new(AppState {
             base_url: BASE.to_string(),
+            page_size: DEFAULT_PAGE_SIZE,
             catalog: Arc::new(catalog),
             auth: Some(Arc::new(users)),
             library_dir: None,
@@ -1041,6 +1051,32 @@ mod tests {
             .await
             .unwrap();
 
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, content_type, json)
+    }
+
+    /// Like `get`, but against an app configured with a specific page size so
+    /// pagination can be exercised against the small sample catalog.
+    async fn get_paged(uri: &str, page_size: u64) -> (StatusCode, String, Value) {
+        let app = app(Arc::new(AppState {
+            base_url: BASE.to_string(),
+            page_size,
+            catalog: sample_store().await,
+            auth: None,
+            library_dir: None,
+        }));
+        let response = app
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
         let status = response.status();
         let content_type = response
             .headers()
@@ -1239,7 +1275,7 @@ mod tests {
 
     #[tokio::test]
     async fn all_publications_first_page_paginates() {
-        let (status, content_type, json) = get("/opds/all?page=1").await;
+        let (status, content_type, json) = get_paged("/opds/all?page=1", 3).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(content_type, FEED_MEDIA_TYPE);
 
@@ -1260,7 +1296,7 @@ mod tests {
 
     #[tokio::test]
     async fn all_publications_last_page_has_previous_not_next() {
-        let (_, _, json) = get("/opds/all?page=2").await;
+        let (_, _, json) = get_paged("/opds/all?page=2", 3).await;
         assert_eq!(json["metadata"]["currentPage"], 2);
         assert_eq!(json["publications"].as_array().unwrap().len(), 2);
 
@@ -1271,7 +1307,7 @@ mod tests {
 
     #[tokio::test]
     async fn out_of_range_page_is_clamped() {
-        let (status, _, json) = get("/opds/all?page=999").await;
+        let (status, _, json) = get_paged("/opds/all?page=999", 3).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["metadata"]["currentPage"], 2);
     }
@@ -1523,6 +1559,7 @@ mod tests {
 
         let app = app(Arc::new(AppState {
             base_url: BASE.to_string(),
+            page_size: DEFAULT_PAGE_SIZE,
             catalog: Arc::new(store),
             auth: None,
             library_dir: Some(dir.clone()),
