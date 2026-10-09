@@ -333,9 +333,10 @@ fn app(state: Arc<AppState>) -> Router {
         .layer(tower_http::trace::TraceLayer::new_for_http().on_request(
             |req: &axum::http::Request<axum::body::Body>, span: &tracing::Span| {
                 for (k, v) in req.headers() {
-                    if let Ok(v) = v.to_str() {
-                        span.record(k.to_string().as_str(), v);
-                    }
+                    let v = v.as_bytes();
+                    let s = String::from_utf8_lossy(v);
+                    let s = s.get(..50).unwrap_or(&s[..]);
+                    tracing::debug!("{k}: {s}");
                 }
             },
         ))
