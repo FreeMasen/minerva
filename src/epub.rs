@@ -199,10 +199,10 @@ fn parse_opf(opf: &str, opf_path: &str) -> Result<EpubMeta, String> {
     // EPUB2 fallback: resolve the <meta name="cover"> id against the manifest.
     if cover.is_none()
         && let Some(id) = cover_meta_id
-            && let Some((href, mt)) = items.get(id.as_str())
-        {
-            cover = Some(((*href).to_string(), (*mt).to_string()));
-        }
+        && let Some((href, mt)) = items.get(id.as_str())
+    {
+        cover = Some(((*href).to_string(), (*mt).to_string()));
+    }
 
     // Series: prefer an EPUB3 collection typed "series" (or an untyped one),
     // otherwise fall back to the flat Calibre metadata.

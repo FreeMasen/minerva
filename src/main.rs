@@ -330,7 +330,15 @@ fn app(state: Arc<AppState>) -> Router {
 
     public
         .merge(protected)
-        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(tower_http::trace::TraceLayer::new_for_http().on_request(
+            |req: &axum::http::Request<axum::body::Body>, span: &tracing::Span| {
+                for (k, v) in req.headers() {
+                    if let Ok(v) = v.to_str() {
+                        span.record(k.to_string().as_str(), v);
+                    }
+                }
+            },
+        ))
         .with_state(state)
 }
 
