@@ -16,6 +16,7 @@ const AUTH_REALM: &str = "OPDS catalog";
 const DEFAULT_PAGE_SIZE: u64 = 25;
 
 mod admin;
+mod atom;
 mod auth;
 mod catalog;
 mod covers;
@@ -23,6 +24,7 @@ mod db;
 mod epub;
 mod library;
 mod model;
+mod opds1;
 mod watch;
 mod xtc;
 
@@ -67,7 +69,10 @@ struct Cli {
 
     /// Socket address to bind (host:port). Typically an internal address
     /// behind a reverse proxy; distinct from the externally-visible base URL.
-    #[arg(long, short = 'l', env = "OPDS_LISTEN", default_value = "0.0.0.0:3000")]
+    ///
+    /// Long form only: `-l` would be ambiguous between this and
+    /// `--library-dir`, so neither takes a short option.
+    #[arg(long, env = "OPDS_LISTEN", default_value = "0.0.0.0:3000")]
     listen: SocketAddr,
 
     /// Number of publications per page in acquisition feeds.
@@ -79,7 +84,9 @@ struct Cli {
     db: PathBuf,
 
     /// Directory of EPUB files to serve (required to run the server).
-    #[arg(long, short, env = "OPDS_LIBRARY_DIR")]
+    ///
+    /// Long form only, as for `--listen` above.
+    #[arg(long, env = "OPDS_LIBRARY_DIR")]
     library_dir: Option<PathBuf>,
 
     /// Maximum admin upload size, in MiB. Keep this at or below any reverse
@@ -319,6 +326,7 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/opds/borrow/{id}", get(borrow))
         .route("/opds/covers/{id}", get(cover))
         .route("/opds/covers/{id}/thumb", get(cover_thumb))
+        .merge(opds1::routes())
         .merge(admin::routes(state.max_upload_bytes))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
@@ -490,6 +498,13 @@ async fn root_feed(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 .with_type(FEED_MEDIA_TYPE)
                 .with_title("Search the catalog")
                 .templated(),
+        )
+        .with_link(
+            // The same catalog as OPDS 1.2, for clients that speak only Atom.
+            Link::new(format!("{base}/opds1"))
+                .with_rel("alternate")
+                .with_type(atom::NAVIGATION_MEDIA_TYPE)
+                .with_title("OPDS 1.2 catalog"),
         );
 
     feed.metadata.description =
@@ -498,14 +513,14 @@ async fn root_feed(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     if state.auth.is_some() {
         feed = feed.with_link(
             Link::new(format!("{base}/opds/auth"))
-                .with_rel("http://opds-spec.org/auth/document")
+                .with_rel(rel::AUTH_DOCUMENT)
                 .with_type(AUTH_MEDIA_TYPE),
         );
     }
 
     feed.navigation = vec![
         Link::new(format!("{base}/opds/all"))
-            .with_rel("http://opds-spec.org/sort/new")
+            .with_rel(rel::SORT_NEW)
             .with_type(FEED_MEDIA_TYPE)
             .with_title("All Publications"),
     ];
@@ -575,6 +590,28 @@ struct PageParams {
     page: Option<u64>,
 }
 
+/// Where one page sits within a paginated feed.
+struct PageWindow {
+    /// The requested page, clamped into range (1-based).
+    page: u64,
+    /// The highest page number: at least 1, even for an empty catalog.
+    last_page: u64,
+    /// The row offset of the page's first item.
+    offset: u64,
+}
+
+/// Resolve a requested page number against the catalog's size. Shared by the
+/// OPDS 2.0 and 1.x acquisition feeds so both paginate identically.
+fn page_window(total: u64, page_size: u64, requested: Option<u64>) -> PageWindow {
+    let last_page = total.div_ceil(page_size).max(1);
+    let page = requested.unwrap_or(1).clamp(1, last_page);
+    PageWindow {
+        page,
+        last_page,
+        offset: (page - 1) * page_size,
+    }
+}
+
 /// An acquisition feed containing every publication, paginated, with category
 /// facets and `first`/`previous`/`next`/`last` pagination links.
 async fn all_publications(
@@ -585,11 +622,13 @@ async fn all_publications(
     let page_size = state.page_size;
     let total = state.catalog.count().await;
 
-    // At least one page even when the catalog is empty.
-    let last_page = total.div_ceil(page_size).max(1);
-    let page = params.page.unwrap_or(1).clamp(1, last_page);
+    let PageWindow {
+        page,
+        last_page,
+        offset,
+    } = page_window(total, page_size, params.page);
 
-    let page_books = state.catalog.page(page_size, (page - 1) * page_size).await;
+    let page_books = state.catalog.page(page_size, offset).await;
 
     let page_href = |p: u64| format!("{base}/opds/all?page={p}");
 
@@ -708,6 +747,32 @@ struct SearchParams {
     title: Option<String>,
 }
 
+impl SearchParams {
+    /// The supplied terms, normalized for matching (trimmed and lowercased).
+    /// An absent field becomes an empty term, which matches everything.
+    fn terms(&self) -> (String, String, String) {
+        let normalize = |s: &str| s.trim().to_lowercase();
+        (
+            normalize(&self.query),
+            normalize(self.author.as_deref().unwrap_or_default()),
+            normalize(self.title.as_deref().unwrap_or_default()),
+        )
+    }
+
+    /// The supplied parameters as a query string, to echo back in a feed's
+    /// `self` link.
+    fn query_string(&self) -> String {
+        let mut out = format!("query={}", urlencode(&self.query));
+        if let Some(author) = &self.author {
+            out.push_str(&format!("&author={}", urlencode(author)));
+        }
+        if let Some(title) = &self.title {
+            out.push_str(&format!("&title={}", urlencode(title)));
+        }
+        out
+    }
+}
+
 /// A search feed. `query` matches title/author/description; the optional
 /// `author` and `title` fields further constrain the results (all supplied
 /// terms must match).
@@ -717,30 +782,11 @@ async fn search(
 ) -> impl IntoResponse {
     let base = &state.base_url;
 
-    let query = params.query.trim().to_lowercase();
-    let author = params
-        .author
-        .as_deref()
-        .unwrap_or_default()
-        .trim()
-        .to_lowercase();
-    let title = params
-        .title
-        .as_deref()
-        .unwrap_or_default()
-        .trim()
-        .to_lowercase();
-
+    let (query, author, title) = params.terms();
     let matches = state.catalog.search(&query, &author, &title).await;
 
     // Echo the supplied parameters back in the self link.
-    let mut self_href = format!("{base}/opds/search?query={}", urlencode(&params.query));
-    if let Some(author) = &params.author {
-        self_href.push_str(&format!("&author={}", urlencode(author)));
-    }
-    if let Some(title) = &params.title {
-        self_href.push_str(&format!("&title={}", urlencode(title)));
-    }
+    let self_href = format!("{base}/opds/search?{}", params.query_string());
 
     let mut feed = Feed::new("Search results", self_href).with_link(
         Link::new(format!("{base}/opds"))
@@ -1082,9 +1128,10 @@ mod tests {
         (status, content_type, json)
     }
 
-    /// Like `get`, but against an app configured with a specific page size so
-    /// pagination can be exercised against the small sample catalog.
-    async fn get_paged(uri: &str, page_size: u64) -> (StatusCode, String, Value) {
+    /// Issue a GET against an app configured with a specific page size, so
+    /// pagination can be exercised against the small sample catalog. Returns
+    /// the status, content type, and raw body.
+    async fn get_paged_raw(uri: &str, page_size: u64) -> (StatusCode, String, Vec<u8>) {
         let app = app(Arc::new(AppState {
             base_url: BASE.to_string(),
             page_size,
@@ -1105,8 +1152,24 @@ mod tests {
             .unwrap_or_default()
             .to_string();
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, content_type, bytes.to_vec())
+    }
+
+    /// Like `get`, but with a specific page size.
+    async fn get_paged(uri: &str, page_size: u64) -> (StatusCode, String, Value) {
+        let (status, content_type, bytes) = get_paged_raw(uri, page_size).await;
         let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, content_type, json)
+    }
+
+    /// Like `get_xml`, but with a specific page size.
+    async fn get_xml_paged(uri: &str, page_size: u64) -> (StatusCode, String, String) {
+        let (status, content_type, bytes) = get_paged_raw(uri, page_size).await;
+        (
+            status,
+            content_type,
+            String::from_utf8(bytes).expect("an XML body is UTF-8"),
+        )
     }
 
     /// Issue a GET and return the status, content-type, all response headers,
@@ -1927,5 +1990,475 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         let response = get("/opds/publications/frankenstein").await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // --- OPDS 1.x (Atom) ---
+
+    /// Issue a GET and return the status, content type, and the body as text.
+    async fn get_xml(uri: &str) -> (StatusCode, String, String) {
+        let (status, content_type, _, bytes) = get_raw(uri).await;
+        (
+            status,
+            content_type,
+            String::from_utf8(bytes).expect("an XML body is UTF-8"),
+        )
+    }
+
+    /// Parse an XML body, reporting the body itself when it is malformed.
+    fn xml(body: &str) -> roxmltree::Document<'_> {
+        roxmltree::Document::parse(body)
+            .unwrap_or_else(|err| panic!("malformed XML: {err}\n{body}"))
+    }
+
+    /// The direct child element with this local name.
+    fn child<'a, 'i>(node: roxmltree::Node<'a, 'i>, name: &str) -> roxmltree::Node<'a, 'i> {
+        node.children()
+            .find(|n| n.is_element() && n.tag_name().name() == name)
+            .unwrap_or_else(|| panic!("no <{name}> child"))
+    }
+
+    /// The text of the direct child element with this local name.
+    fn child_text(node: roxmltree::Node<'_, '_>, name: &str) -> String {
+        child(node, name).text().unwrap_or_default().to_string()
+    }
+
+    /// A document's `<entry>` elements.
+    fn entries<'a, 'i>(doc: &'a roxmltree::Document<'i>) -> Vec<roxmltree::Node<'a, 'i>> {
+        doc.root_element()
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "entry")
+            .collect()
+    }
+
+    /// The `<link>` children of a node, as (rel, href) pairs.
+    fn link_pairs(node: roxmltree::Node<'_, '_>) -> Vec<(String, String)> {
+        node.children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "link")
+            .map(|n| {
+                (
+                    n.attribute("rel").unwrap_or_default().to_string(),
+                    n.attribute("href").unwrap_or_default().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// The href of a node's first `<link>` child with this rel.
+    fn link_href(node: roxmltree::Node<'_, '_>, rel: &str) -> String {
+        link_pairs(node)
+            .into_iter()
+            .find(|(r, _)| r == rel)
+            .unwrap_or_else(|| panic!("no link with rel {rel:?}"))
+            .1
+    }
+
+    /// The `<entry>` for a book id, from an acquisition feed.
+    fn entry_for<'a, 'i>(
+        doc: &'a roxmltree::Document<'i>,
+        id: &str,
+    ) -> roxmltree::Node<'a, 'i> {
+        let wanted = format!("urn:opds:book:{id}");
+        entries(doc)
+            .into_iter()
+            .find(|e| child_text(*e, "id") == wanted)
+            .unwrap_or_else(|| panic!("no entry for {id}"))
+    }
+
+    #[tokio::test]
+    async fn opds1_root_is_a_navigation_feed() {
+        let (status, content_type, body) = get_xml("/opds1").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type, atom::NAVIGATION_MEDIA_TYPE);
+
+        let doc = xml(&body);
+        let root = doc.root_element();
+        assert_eq!(root.tag_name().name(), "feed");
+        assert_eq!(child_text(root, "id"), format!("{BASE}/opds1"));
+
+        // The browsable views, each a link to a further feed.
+        let titles: Vec<String> = entries(&doc)
+            .iter()
+            .map(|e| child_text(*e, "title"))
+            .collect();
+        assert_eq!(
+            titles,
+            vec![
+                "All Publications",
+                "New Publications",
+                "Browse by Category",
+                "Browse by Author",
+            ]
+        );
+        for entry in entries(&doc) {
+            let (rel, href) = link_pairs(entry).into_iter().next().expect("a link");
+            assert_eq!(rel, "subsection");
+            assert!(href.starts_with(&format!("{BASE}/opds1/")), "{href}");
+        }
+
+        // A navigation entry points at a navigation feed and an acquisition
+        // entry at an acquisition feed: clients dispatch on this.
+        let kind = |title: &str| {
+            let entry = entries(&doc)
+                .into_iter()
+                .find(|e| child_text(*e, "title") == title)
+                .expect("the entry");
+            child(entry, "link")
+                .attribute("type")
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert_eq!(kind("All Publications"), atom::ACQUISITION_MEDIA_TYPE);
+        assert_eq!(kind("Browse by Category"), atom::NAVIGATION_MEDIA_TYPE);
+
+        // Search is discovered through an OpenSearch description document.
+        let search = doc
+            .root_element()
+            .children()
+            .find(|n| n.attribute("rel") == Some("search"))
+            .expect("a search link");
+        assert_eq!(search.attribute("type"), Some(atom::OPENSEARCH_MEDIA_TYPE));
+        assert_eq!(
+            search.attribute("href"),
+            Some(format!("{BASE}/opds1/opensearch.xml").as_str())
+        );
+        assert_eq!(link_href(root, "start"), format!("{BASE}/opds1"));
+    }
+
+    #[tokio::test]
+    async fn opds1_all_publications_paginates() {
+        let (status, content_type, body) = get_xml_paged("/opds1/all?page=1", 3).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type, atom::ACQUISITION_MEDIA_TYPE);
+
+        let doc = xml(&body);
+        let root = doc.root_element();
+        assert_eq!(entries(&doc).len(), 3);
+
+        // OpenSearch counts replace 2.0's numberOfItems/itemsPerPage/currentPage.
+        assert_eq!(child_text(root, "totalResults"), "5");
+        assert_eq!(child_text(root, "itemsPerPage"), "3");
+        assert_eq!(child_text(root, "startIndex"), "1");
+
+        let rels: Vec<String> = link_pairs(root).into_iter().map(|(r, _)| r).collect();
+        assert!(rels.contains(&"first".to_string()));
+        assert!(rels.contains(&"last".to_string()));
+        assert!(rels.contains(&"next".to_string()));
+        assert!(!rels.contains(&"previous".to_string()));
+        assert_eq!(
+            link_href(root, "next"),
+            format!("{BASE}/opds1/all?page=2")
+        );
+        // The self link echoes the page actually served.
+        assert_eq!(
+            link_href(root, "self"),
+            format!("{BASE}/opds1/all?page=1")
+        );
+    }
+
+    #[tokio::test]
+    async fn opds1_all_publications_last_page_has_previous_not_next() {
+        let (_, _, body) = get_xml_paged("/opds1/all?page=2", 3).await;
+        let doc = xml(&body);
+        let root = doc.root_element();
+
+        assert_eq!(entries(&doc).len(), 2);
+        assert_eq!(child_text(root, "startIndex"), "4");
+        let rels: Vec<String> = link_pairs(root).into_iter().map(|(r, _)| r).collect();
+        assert!(rels.contains(&"previous".to_string()));
+        assert!(!rels.contains(&"next".to_string()));
+    }
+
+    #[tokio::test]
+    async fn opds1_all_publications_carries_category_facets() {
+        let (_, _, body) = get_xml("/opds1/all").await;
+        let doc = xml(&body);
+
+        let facets: Vec<roxmltree::Node<'_, '_>> = doc
+            .root_element()
+            .children()
+            .filter(|n| n.attribute("rel") == Some(model::rel::FACET))
+            .collect();
+        assert_eq!(facets.len(), 2, "one facet per sample category");
+
+        let fiction = facets
+            .iter()
+            .find(|n| n.attribute("title") == Some("Fiction"))
+            .expect("a Fiction facet");
+        assert_eq!(
+            fiction.attribute(("http://opds-spec.org/2010/catalog", "facetGroup")),
+            Some("Category")
+        );
+        assert_eq!(
+            fiction.attribute(("http://purl.org/syndication/thread/1.0", "count")),
+            Some("3")
+        );
+        assert_eq!(
+            fiction.attribute("href"),
+            Some(format!("{BASE}/opds1/category/fiction").as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn opds1_category_index_lists_categories_with_counts() {
+        let (status, content_type, body) = get_xml("/opds1/categories").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type, atom::NAVIGATION_MEDIA_TYPE);
+
+        let doc = xml(&body);
+        let entries = entries(&doc);
+        assert_eq!(entries.len(), 2);
+
+        let nonfiction = entries
+            .iter()
+            .find(|e| child_text(**e, "title") == "Non-Fiction")
+            .expect("the Non-Fiction entry");
+        assert_eq!(child_text(*nonfiction, "summary"), "2 publications");
+        let link = child(*nonfiction, "link");
+        assert_eq!(link.attribute("rel"), Some("subsection"));
+        assert_eq!(link.attribute("type"), Some(atom::ACQUISITION_MEDIA_TYPE));
+        assert_eq!(
+            link.attribute(("http://purl.org/syndication/thread/1.0", "count")),
+            Some("2")
+        );
+    }
+
+    #[tokio::test]
+    async fn opds1_category_feed_filters_and_404s_unknown() {
+        let (status, content_type, body) = get_xml("/opds1/category/nonfiction").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type, atom::ACQUISITION_MEDIA_TYPE);
+
+        let doc = xml(&body);
+        assert_eq!(entries(&doc).len(), 2);
+        assert_eq!(child_text(doc.root_element(), "totalResults"), "2");
+        // `up` leads back to the category index, not to the flat feed.
+        assert_eq!(
+            link_href(doc.root_element(), "up"),
+            format!("{BASE}/opds1/categories")
+        );
+
+        let (status, _, _) = get_xml("/opds1/category/bogus").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn opds1_author_index_and_feed() {
+        let (status, content_type, body) = get_xml("/opds1/authors").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type, atom::NAVIGATION_MEDIA_TYPE);
+        let doc = xml(&body);
+        assert_eq!(entries(&doc).len(), 5);
+
+        let (status, content_type, body) = get_xml("/opds1/authors/jane-austen").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type, atom::ACQUISITION_MEDIA_TYPE);
+        let doc = xml(&body);
+        assert_eq!(child_text(doc.root_element(), "title"), "Jane Austen");
+        assert_eq!(entries(&doc).len(), 1);
+
+        let (status, _, _) = get_xml("/opds1/authors/nobody").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn opds1_open_access_entry_links_its_download_and_covers() {
+        let (_, _, body) = get_xml("/opds1/all").await;
+        let doc = xml(&body);
+        let entry = entry_for(&doc, "moby-dick");
+
+        assert_eq!(child_text(entry, "title"), "Moby-Dick; or, The Whale");
+        assert_eq!(child_text(child(entry, "author"), "name"), "Herman Melville");
+        // `updated` is required by Atom and must be a real timestamp.
+        assert!(
+            child_text(entry, "updated")
+                .parse::<jiff::Timestamp>()
+                .is_ok()
+        );
+
+        // The acquisition and cover endpoints are shared with the 2.0 tree.
+        assert_eq!(
+            link_href(entry, model::rel::OPEN_ACCESS),
+            format!("{BASE}/opds/download/moby-dick.epub")
+        );
+        assert_eq!(
+            link_href(entry, model::rel::IMAGE),
+            format!("{BASE}/opds/covers/moby-dick")
+        );
+        assert_eq!(
+            link_href(entry, model::rel::THUMBNAIL),
+            format!("{BASE}/opds/covers/moby-dick/thumb")
+        );
+        // In a feed, the entry points at its own complete-entry document.
+        let alternate = entry
+            .children()
+            .find(|n| n.attribute("rel") == Some("alternate"))
+            .expect("an alternate link");
+        assert_eq!(alternate.attribute("type"), Some(atom::ENTRY_MEDIA_TYPE));
+        assert_eq!(
+            alternate.attribute("href"),
+            Some(format!("{BASE}/opds1/publications/moby-dick").as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn opds1_paid_entry_carries_price_and_indirect_acquisition() {
+        let (_, _, body) = get_xml("/opds1/all").await;
+        let doc = xml(&body);
+        let entry = entry_for(&doc, "pride-and-prejudice");
+
+        let buy = entry
+            .children()
+            .find(|n| n.attribute("rel") == Some(model::rel::BUY))
+            .expect("a buy link");
+        assert_eq!(buy.attribute("type"), Some("text/html"));
+
+        let price = child(buy, "price");
+        assert_eq!(price.attribute("currencycode"), Some("USD"));
+        assert_eq!(price.text(), Some("4.99"));
+        assert_eq!(
+            child(buy, "indirectAcquisition").attribute("type"),
+            Some("application/epub+zip")
+        );
+        // A paid title advertises no free download.
+        assert!(
+            !link_pairs(entry)
+                .iter()
+                .any(|(rel, _)| rel == model::rel::OPEN_ACCESS)
+        );
+    }
+
+    #[tokio::test]
+    async fn opds1_lendable_entry_carries_availability_and_counts() {
+        let (_, _, body) = get_xml("/opds1/all").await;
+        let doc = xml(&body);
+        let entry = entry_for(&doc, "the-art-of-war");
+
+        let borrow = entry
+            .children()
+            .find(|n| n.attribute("rel") == Some(model::rel::BORROW))
+            .expect("a borrow link");
+        assert_eq!(child(borrow, "availability").attribute("status"), Some("available"));
+        let copies = child(borrow, "copies");
+        assert_eq!(copies.attribute("total"), Some("3"));
+        assert_eq!(copies.attribute("available"), Some("2"));
+        assert_eq!(child(borrow, "holds").attribute("total"), Some("1"));
+    }
+
+    #[tokio::test]
+    async fn opds1_publication_is_a_complete_entry_document() {
+        let (status, content_type, body) = get_xml("/opds1/publications/moby-dick").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type, atom::ENTRY_MEDIA_TYPE);
+
+        let doc = xml(&body);
+        let entry = doc.root_element();
+        assert_eq!(entry.tag_name().name(), "entry");
+        assert_eq!(
+            entry.tag_name().namespace(),
+            Some("http://www.w3.org/2005/Atom")
+        );
+        assert_eq!(child_text(entry, "title"), "Moby-Dick; or, The Whale");
+
+        // The document names itself, and drops the feed form's `alternate`.
+        assert_eq!(
+            link_href(entry, "self"),
+            format!("{BASE}/opds1/publications/moby-dick")
+        );
+        assert!(!link_pairs(entry).iter().any(|(rel, _)| rel == "alternate"));
+
+        // The full description rides as HTML content, and the publication's
+        // categories are listed.
+        let content = child(entry, "content");
+        assert_eq!(content.attribute("type"), Some("html"));
+        assert!(!content.text().unwrap_or_default().is_empty());
+        let category = child(entry, "category");
+        assert_eq!(category.attribute("term"), Some("fiction"));
+        assert_eq!(category.attribute("label"), Some("Fiction"));
+
+        let (status, _, _) = get_xml("/opds1/publications/does-not-exist").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn opds1_search_returns_matching_entries() {
+        let (status, content_type, body) = get_xml("/opds1/search?query=whale").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type, atom::ACQUISITION_MEDIA_TYPE);
+
+        let doc = xml(&body);
+        assert_eq!(child_text(doc.root_element(), "totalResults"), "1");
+        assert_eq!(entries(&doc).len(), 1);
+        assert_eq!(
+            child_text(entries(&doc)[0], "title"),
+            "Moby-Dick; or, The Whale"
+        );
+
+        // The field filters behave as they do on the 2.0 endpoint.
+        let (_, _, body) = get_xml("/opds1/search?author=austen").await;
+        let doc = xml(&body);
+        assert_eq!(entries(&doc).len(), 1);
+        assert_eq!(child_text(entries(&doc)[0], "title"), "Pride and Prejudice");
+
+        let (_, _, body) = get_xml("/opds1/search?query=").await;
+        let doc = xml(&body);
+        assert_eq!(entries(&doc).len(), 0);
+        assert_eq!(child_text(doc.root_element(), "totalResults"), "0");
+    }
+
+    #[tokio::test]
+    async fn opds1_opensearch_description_advertises_the_endpoint() {
+        let (status, content_type, body) = get_xml("/opds1/opensearch.xml").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type, atom::OPENSEARCH_MEDIA_TYPE);
+
+        let doc = xml(&body);
+        assert_eq!(doc.root_element().tag_name().name(), "OpenSearchDescription");
+        let url = child(doc.root_element(), "Url");
+        assert_eq!(url.attribute("type"), Some(atom::ACQUISITION_MEDIA_TYPE));
+        assert_eq!(
+            url.attribute("template"),
+            Some(format!("{BASE}/opds1/search?query={{searchTerms}}").as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn opds1_new_publications_feed_is_served() {
+        let (status, content_type, body) = get_xml("/opds1/new").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type, atom::ACQUISITION_MEDIA_TYPE);
+        let doc = xml(&body);
+        assert_eq!(child_text(doc.root_element(), "title"), "New Publications");
+        assert_eq!(entries(&doc).len(), 5);
+    }
+
+    // The 1.x tree sits behind the same auth middleware as the 2.0 tree.
+    #[tokio::test]
+    async fn opds1_is_protected_when_auth_is_enabled() {
+        let response = test_app_with_auth()
+            .await
+            .oneshot(
+                Request::builder()
+                    .uri("/opds1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(response.headers().contains_key(header::WWW_AUTHENTICATE));
+
+        let credentials = BASE64_STANDARD.encode(b"admin:secret");
+        let response = test_app_with_auth()
+            .await
+            .oneshot(
+                Request::builder()
+                    .uri("/opds1")
+                    .header(header::AUTHORIZATION, format!("Basic {credentials}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

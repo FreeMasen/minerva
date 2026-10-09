@@ -1,13 +1,32 @@
 # minerva
 
-An [OPDS 2.0](https://specs.opds.io/opds-2.0.html) catalog server built with
-[Axum](https://github.com/tokio-rs/axum).
+An [OPDS 2.0](https://specs.opds.io/opds-2.0.html) and
+[OPDS 1.2](https://specs.opds.io/opds-1.2) catalog server built with
+[Axum](https://github.com/tokio-rs/axum). One catalog, served in both versions:
+OPDS 2.0 under `/opds` and OPDS 1.2 under `/opds1`.
 
 OPDS 2.0 is built on the Readium Web Publication Manifest model: everything is a
 JSON *collection* made of `metadata`, `links`, and sub-collections
 (`navigation`, `publications`, `facets`, `groups`). Feeds are served as
 `application/opds+json` and individual publications as
 `application/opds-publication+json`.
+
+OPDS 1.2 predates that model: a catalog is an Atom feed, either a *navigation*
+feed whose entries link to further feeds or an *acquisition* feed whose entries
+are publications, and the OPDS vocabulary (prices, indirect acquisition,
+lending availability) rides along in the `opds:` XML namespace. Most existing
+readers — KOReader, Moon+ Reader, Aldiko, Thorium — speak this version.
+
+### Which version should a client use?
+
+Point the client at `/opds` if it speaks OPDS 2.0, and at `/opds1` otherwise.
+Each root carries an `alternate` link to the other, so either one is a usable
+starting point.
+
+The two versions live at separate URLs rather than negotiating on `Accept`.
+OPDS 1.x clients commonly send `Accept: */*`, and every href inside an Atom
+feed has to resolve to Atom for browsing to continue — so a feed's version is
+settled by its path, not by a header the client may not send.
 
 ## Running
 
@@ -56,23 +75,54 @@ and are not compiled into the server.)
 
 ## Endpoints
 
+### Shared
+
 | Method & path                  | Description                                             |
 | ------------------------------ | ------------------------------------------------------- |
 | `GET /`                        | Redirects to `/opds`.                                   |
+| `GET /opds/download/{id}/{format}` | Open-access download of one format (`epub`/`xtc`/`xtch`), streamed from disk. |
+| `GET /opds/download/{id}.epub` | Open-access download of a sample book: a generated minimal EPUB 3. |
+| `GET /opds/covers/{id}`        | A book's cover (embedded image, or a generated SVG).    |
+| `GET /opds/covers/{id}/thumb`  | The thumbnail form of the same.                         |
+| `GET /opds/buy/{id}`           | Advertised for spec completeness; returns 501 (no store).|
+| `GET /opds/borrow/{id}`        | Advertised for lendable titles; returns 501 (no lending).|
+| `GET /opds/auth`               | Authentication document (when auth is enabled).         |
+
+Both catalogs link to these: they serve bytes rather than feeds, so there is
+nothing version-specific about them.
+
+### OPDS 2.0
+
+| Method & path                  | Description                                             |
+| ------------------------------ | ------------------------------------------------------- |
 | `GET /opds`                    | Root feed: navigation, a "New Publications" **group**, and a browse group. |
 | `GET /opds/all?page=N`         | Paginated **acquisition** feed of all publications, with facets and pagination links. |
 | `GET /opds/category/{slug}`    | Acquisition feed for a category.                        |
+| `GET /opds/authors/{slug}`     | Acquisition feed for an author.                         |
 | `GET /opds/publications/{id}`  | A single publication document.                          |
 | `GET /opds/publications/{id}/categories` | JSON list of a publication's categories.      |
 | `POST /opds/publications/{id}/categories` | Assign a category: `{"name": "Sci-Fi"}` (created on demand). |
 | `DELETE /opds/publications/{id}/categories/{slug}` | Remove a category from a publication. |
 | `GET /opds/search?query=...`   | Search feed; also accepts `author=` and `title=` field filters. |
-| `GET /opds/download/{id}/{format}` | Open-access download of one format (`epub`/`xtc`/`xtch`), streamed from disk. |
-| `GET /opds/download/{id}.epub` | Open-access download of a sample book: a generated minimal EPUB 3. |
-| `GET /opds/buy/{id}`           | Advertised for spec completeness; returns 501 (no store).|
-| `GET /opds/borrow/{id}`        | Advertised for lendable titles; returns 501 (no lending).|
-| `GET /opds/covers/{id}.svg`    | Generated SVG cover (`{id}-thumb.svg` for the thumbnail).|
-| `GET /opds/auth`               | Authentication document (when auth is enabled).         |
+
+### OPDS 1.2
+
+| Method & path                     | Feed kind                                            |
+| --------------------------------- | ---------------------------------------------------- |
+| `GET /opds1`                      | **Navigation**: the catalog root, one entry per browsable view. |
+| `GET /opds1/all?page=N`           | **Acquisition**: every publication, paginated, with category facets. |
+| `GET /opds1/new`                  | **Acquisition**: the most recently added titles.     |
+| `GET /opds1/categories`           | **Navigation**: one entry per category, with counts. |
+| `GET /opds1/category/{slug}`      | **Acquisition**: one category.                       |
+| `GET /opds1/authors`              | **Navigation**: one entry per author, with counts.   |
+| `GET /opds1/authors/{slug}`       | **Acquisition**: one author.                         |
+| `GET /opds1/publications/{id}`    | A single "complete entry" document.                  |
+| `GET /opds1/search?query=...`     | **Acquisition**: search results (same filters as 2.0). |
+| `GET /opds1/opensearch.xml`       | The OpenSearch description document.                 |
+
+OPDS 1.x has no equivalent of a 2.0 `group`, so the category and author browse
+groups that the 2.0 root feed inlines become navigation feeds of their own at
+`/opds1/categories` and `/opds1/authors`.
 
 ## What's implemented
 
@@ -111,6 +161,28 @@ and are not compiled into the server.)
   also served (unprotected) at `/opds/auth`.
 - Correct OPDS media types on every response.
 
+### OPDS 1.2 specifically
+
+- Navigation and acquisition feeds, distinguished by the `kind` parameter of
+  their `application/atom+xml;profile=opds-catalog` media type, plus
+  "complete entry" documents for single publications.
+- The full Atom required set on every feed and entry (`id`, `title`,
+  `updated`), with namespaced extensions for everything else: `dcterms:language`,
+  `schema:Series` (name + position), `opds:price` / `opds:indirectAcquisition`,
+  `opds:availability` / `opds:copies` / `opds:holds`, and `thr:count`.
+- Acquisition links mirroring the 2.0 catalog: one `open-access` link per
+  available format (EPUB first — clients pick a format by media type and ignore
+  the ones they don't know, XTC/XTCH among them), or a `buy`/`borrow` link
+  carrying the price or the lending availability.
+- Pagination as RFC 5005 `first`/`previous`/`next`/`last` links plus OpenSearch
+  `totalResults`/`itemsPerPage`/`startIndex` counts.
+- Facets as feed-level links grouped by `opds:facetGroup`, counted with
+  `thr:count` — the 1.x spelling of the 2.0 `facets` collection.
+- Search through an OpenSearch description document (`rel="search"`), rather
+  than 2.0's templated link.
+- All text escaped on write, so metadata containing `&` or `<` (common in
+  real EPUBs) cannot produce a malformed feed.
+
 ## Tests
 
 ```sh
@@ -119,7 +191,11 @@ cargo test
 
 Integration tests drive the fully-wired router (via `tower::ServiceExt::oneshot`)
 and cover the root feed, pagination, category filtering, publication documents,
-search, EPUB/cover/buy asset endpoints, and 404s. A directory-scan test writes a
+search, EPUB/cover/buy asset endpoints, and 404s — for both catalog versions.
+The OPDS 1.x tests parse each response with `roxmltree` and assert on the
+parsed tree (feed kinds, link rels, facet attributes, OpenSearch counts), and
+the `atom` module's own unit tests cover the wire format directly, including
+that nasty metadata round-trips through an XML parser unchanged. A directory-scan test writes a
 generated EPUB to a temp dir and confirms it is picked up and then dropped after
 removal. Tests run against an in-memory SQLite database.
 
@@ -169,7 +245,11 @@ database lives in `/var/lib/minerva`.
 
 ## Layout
 
-- `src/model.rs` — serde types for the OPDS 2.0 wire format.
+- `src/model.rs` — serde types for the OPDS 2.0 wire format, plus the link
+  relations and acquisition vocabulary shared with OPDS 1.x.
+- `src/atom.rs` — the OPDS 1.2 wire format: Atom feeds, entries and the
+  OpenSearch description document.
+- `src/opds1.rs` — the OPDS 1.2 handlers and routes (`/opds1`).
 - `src/catalog.rs` — the `Book`/`Category` domain types, the sample set, and
   library scanning helpers (per-format media types, work grouping).
 - `src/library.rs` — the SQLite-backed catalog store (queries + reconciliation),
