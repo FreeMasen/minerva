@@ -27,6 +27,7 @@ argon2 = "0.5"
 rand_core = { version = "0.6", features = ["getrandom"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+quick-xml = "0.42.0"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

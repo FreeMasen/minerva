@@ -1,3 +1,79 @@
+# OPDS 1.x support — DONE
+
+OPDS 1.2 is served under `/opds1`, alongside the existing OPDS 2.0 catalog at
+`/opds`. Same store, same domain types, same asset endpoints; two presentations.
+
+Decisions worth keeping:
+
+- **Separate URL prefix, not `Accept` negotiation.** 1.x clients commonly send
+  `Accept: */*`, and every href inside an Atom feed must resolve to Atom for
+  browsing to continue — negotiation would depend on a header the client may
+  not send, on every subsequent request. Confirmed during the smoke test: curl
+  (and the clients that behave like it) sends exactly `accept: */*`. Each root
+  carries an `alternate` link to the other version instead.
+- **`quick-xml` 0.42 (new dep), imperative `Writer`.** `roxmltree` (already in
+  tree) only parses. Hand-rolled string building risks an escaping bug on
+  untrusted EPUB metadata; `quick-xml`'s `BytesText::new` and attribute values
+  escape on write. Serde XML fights namespaces; tera templates lose type
+  safety on conditional link sets. No transitive deps added.
+- **Duplicate the handlers, share the policy.** A "shared view layer, two
+  renderers" refactor of the nine 2.0 handlers wasn't worth it. What *is*
+  shared, because it would otherwise drift: `page_window` (pagination
+  arithmetic), `SearchParams::{terms, query_string}` (term normalization and
+  the self-link echo), `Book::acquisition_properties` (the lending/price
+  policy, including the hardcoded demo copy counts), `Book::download_paths`
+  (the per-format download URL scheme), `Book::cover_media_type`, and
+  `model::rel` (the OPDS link relation URIs).
+- **No `groups` in 1.x**, so the 2.0 root's category and author browse groups
+  became navigation feeds of their own: `/opds1/categories`, `/opds1/authors`.
+  A category feed's `up` link leads to its index, not to the flat feed.
+- **`<updated>` is required by Atom** but `Book::modified` is optional, so an
+  entry with no recorded file mtime falls back to feed-build time.
+- **EPUB first in the acquisition links.** Clients dispatch on the link `type`
+  and ignore media types they don't know — `application/x-xtc` means nothing
+  to KOReader or Thorium, so format order decides whether an entry is usable.
+- **`<summary type="text">` on feed entries, `<content type="html">` only in
+  the complete-entry document.** Clients read `summary` more reliably; the
+  description may carry markup, and `html` is its correct Atom carrier.
+
+New files: `src/atom.rs` (wire format), `src/opds1.rs` (handlers + routes).
+Tests: 11 `atom` unit tests (including that `&`/`<`-bearing metadata
+round-trips through an XML parser unchanged) + 15 integration tests driving the
+wired router and asserting on the `roxmltree`-parsed tree. 64 tests pass.
+
+Verified end to end against a real library directory: all 20 URLs reachable
+from `/opds1` return 200 with the right media type, every feed passes
+`xmllint`, the live watcher's ingest shows up in the Atom feeds, and escaped
+EPUB metadata round-trips exactly.
+
+Not done, deliberately:
+
+- `Accept`-based redirect from `/` or `/opds` to `/opds1`. Listed as optional
+  polish in the plan; it risks surprising a 2.0 client, and the `alternate`
+  cross-links already make each version discoverable.
+- Per-entry `<category>` elements in *feeds*. The complete-entry document has
+  them (one store call); doing it for a page of entries wants a batched
+  lookup rather than N+1.
+
+## Pre-existing CLI bug found while verifying — FIXED
+
+`-l` was claimed by both `--listen` (`short = 'l'`) and `--library-dir` (bare
+`short`, derived to `-l`). Clap's duplicate-short check is a `debug_assert`, so
+**every debug build panicked before `main`**:
+
+    Command minerva: Short option names must be unique for each argument,
+    but '-l' is in use by both 'listen' and 'library_dir'
+
+Release builds have the assert compiled out and started fine, which is why it
+went unnoticed since `d59c7a4` — but `cargo run` could not start the server at
+all.
+
+Fixed by dropping the short option from *both* arguments rather than picking a
+winner: `--listen` and `--library-dir` are now long-form only, so there is no
+ambiguity to resolve and no muscle memory to mislead. `-u`/`--base-url` and
+`-d`/`--db` keep their shorts. Verified: `./target/debug/minerva --help` builds
+its command, and the debug server now boots and serves the full catalog.
+
 - [x] admin page still has old name — now "minerva"
 - [x] admin page reloads w/o scroll position on category add — mutations are now
       fetch()-based AJAX; the page updates in place, no reload

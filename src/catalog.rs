@@ -330,6 +330,91 @@ impl Book {
         matches!(self.acquisition, Acquisition::OpenAccess)
     }
 
+    /// The acquisition `rel` and endpoint path segment for a title that is not
+    /// a free download, or `None` for an open-access one. Both wire formats
+    /// advertise the same two endpoints.
+    pub(crate) fn indirect_acquisition(&self) -> Option<(&'static str, &'static str)> {
+        match self.acquisition {
+            Acquisition::OpenAccess => None,
+            Acquisition::Borrow => Some((rel::BORROW, "borrow")),
+            Acquisition::Buy(_) => Some((rel::BUY, "buy")),
+        }
+    }
+
+    /// The extra detail carried on this book's acquisition link: a price and
+    /// the format reached indirectly for a purchase, lending availability and
+    /// copy/hold counts for a borrow, nothing for a free download.
+    ///
+    /// Shared by both wire formats, which differ only in how they render it:
+    /// OPDS 2.0 nests a JSON `properties` object, OPDS 1.x writes `opds:`
+    /// child elements of the link.
+    pub(crate) fn acquisition_properties(&self) -> Option<LinkProperties> {
+        let epub_indirect = || {
+            vec![IndirectAcquisition {
+                r#type: "application/epub+zip".into(),
+                child: Vec::new(),
+            }]
+        };
+        match self.acquisition {
+            Acquisition::OpenAccess => None,
+            Acquisition::Borrow => Some(LinkProperties {
+                indirect_acquisition: epub_indirect(),
+                availability: Some(Availability {
+                    state: AvailabilityState::Available,
+                    since: None,
+                    until: None,
+                }),
+                copies: Some(Copies {
+                    total: Some(3),
+                    available: Some(2),
+                }),
+                holds: Some(Holds {
+                    total: Some(1),
+                    position: None,
+                }),
+                ..Default::default()
+            }),
+            Acquisition::Buy(price) => Some(LinkProperties {
+                price: Some(Price {
+                    currency: "USD".into(),
+                    value: price.as_dollars(),
+                }),
+                indirect_acquisition: epub_indirect(),
+                ..Default::default()
+            }),
+        }
+    }
+
+    /// This book's download paths (relative to the base URL) and their media
+    /// types: one per available format, best metadata first. The single source
+    /// of the per-format download URL scheme.
+    pub(crate) fn download_paths(&self) -> Vec<(String, &'static str)> {
+        match &self.source {
+            BookSource::Sample => vec![(
+                format!("/opds/download/{}.epub", self.id),
+                "application/epub+zip",
+            )],
+            BookSource::Files(files) => files
+                .iter()
+                .map(|file| {
+                    (
+                        format!("/opds/download/{}/{}", self.id, file.format.ext()),
+                        file.format.media_type(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// The media type of this book's cover: the embedded image's own type, or
+    /// SVG for the generated placeholder.
+    pub(crate) fn cover_media_type(&self) -> Cow<'static, str> {
+        match &self.cover {
+            Some(cover) => cover.media_type.clone().into(),
+            None => "image/svg+xml".into(),
+        }
+    }
+
     /// Build the OPDS `Publication` (as embedded in a feed) for this book.
     pub fn to_publication(&self, base: &str) -> Publication {
         let mut metadata = Metadata::new(self.title.clone());
@@ -352,92 +437,39 @@ impl Book {
             .with_rel("self")
             .with_type(PUBLICATION_MEDIA_TYPE);
 
-        // Acquisition link: a library borrow, a paid buy, or a free download.
-        // Borrow and buy both reach the file indirectly (via an intermediate
-        // page), described by indirectAcquisition.
-        let epub_indirect = || {
-            vec![IndirectAcquisition {
-                r#type: "application/epub+zip".into(),
-                child: Vec::new(),
-            }]
-        };
+        // Acquisition link: a library borrow or a paid buy (reached indirectly,
+        // via an intermediate page), or else one free download per format.
         let mut links = vec![self_link];
-        match self.acquisition {
-            Acquisition::Borrow => {
-                links.push(
-                    Link::new(format!("{base}/opds/borrow/{}", self.id))
-                        .with_rel("http://opds-spec.org/acquisition/borrow")
-                        .with_type("text/html")
-                        .with_properties(LinkProperties {
-                            indirect_acquisition: epub_indirect(),
-                            availability: Some(Availability {
-                                state: AvailabilityState::Available,
-                                since: None,
-                                until: None,
-                            }),
-                            copies: Some(Copies {
-                                total: Some(3),
-                                available: Some(2),
-                            }),
-                            holds: Some(Holds {
-                                total: Some(1),
-                                position: None,
-                            }),
-                            ..Default::default()
-                        }),
-                );
+        match self.indirect_acquisition() {
+            Some((rel, segment)) => {
+                let mut link = Link::new(format!("{base}/opds/{segment}/{}", self.id))
+                    .with_rel(rel)
+                    .with_type("text/html");
+                if let Some(properties) = self.acquisition_properties() {
+                    link = link.with_properties(properties);
+                }
+                links.push(link);
             }
-            Acquisition::Buy(price) => {
-                links.push(
-                    Link::new(format!("{base}/opds/buy/{}", self.id))
-                        .with_rel("http://opds-spec.org/acquisition/buy")
-                        .with_type("text/html")
-                        .with_properties(LinkProperties {
-                            price: Some(Price {
-                                currency: "USD".into(),
-                                value: price.as_dollars(),
-                            }),
-                            indirect_acquisition: epub_indirect(),
-                            ..Default::default()
-                        }),
-                );
-            }
-            Acquisition::OpenAccess => {
-                // One download link per available format.
-                match &self.source {
-                    BookSource::Sample => links.push(
-                        Link::new(format!("{base}/opds/download/{}.epub", self.id))
-                            .with_rel("http://opds-spec.org/acquisition/open-access")
-                            .with_type("application/epub+zip"),
-                    ),
-                    BookSource::Files(files) => {
-                        for file in files {
-                            links.push(
-                                Link::new(format!(
-                                    "{base}/opds/download/{}/{}",
-                                    self.id,
-                                    file.format.ext()
-                                ))
-                                .with_rel("http://opds-spec.org/acquisition/open-access")
-                                .with_type(file.format.media_type()),
-                            );
-                        }
-                    }
+            None => {
+                for (path, media_type) in self.download_paths() {
+                    links.push(
+                        Link::new(format!("{base}{path}"))
+                            .with_rel(rel::OPEN_ACCESS)
+                            .with_type(media_type),
+                    );
                 }
             }
         }
 
         // Cover: a real embedded image when we have one, otherwise a generated
         // SVG placeholder (for which we know the exact dimensions).
-        let (cover_type, generated): (Cow<'static, str>, bool) = match &self.cover {
-            Some(c) => (c.media_type.clone().into(), false),
-            None => ("image/svg+xml".into(), true),
-        };
+        let cover_type = self.cover_media_type();
+        let generated = self.cover.is_none();
         let mut cover = Link::new(format!("{base}/opds/covers/{}", self.id))
-            .with_rel("http://opds-spec.org/image")
+            .with_rel(rel::IMAGE)
             .with_type(cover_type.clone());
         let mut thumbnail = Link::new(format!("{base}/opds/covers/{}/thumb", self.id))
-            .with_rel("http://opds-spec.org/image/thumbnail")
+            .with_rel(rel::THUMBNAIL)
             .with_type(cover_type);
         if generated {
             cover = cover.with_dimensions(800, 1200);

@@ -13,6 +13,19 @@ pub const PUBLICATION_MEDIA_TYPE: &str = "application/opds-publication+json";
 /// Media type for an Authentication for OPDS document.
 pub const AUTH_MEDIA_TYPE: &str = "application/opds-authentication+json";
 
+/// OPDS link relations. Both catalog versions advertise the same relations;
+/// only the syntax carrying them differs.
+pub mod rel {
+    pub const OPEN_ACCESS: &str = "http://opds-spec.org/acquisition/open-access";
+    pub const BORROW: &str = "http://opds-spec.org/acquisition/borrow";
+    pub const BUY: &str = "http://opds-spec.org/acquisition/buy";
+    pub const IMAGE: &str = "http://opds-spec.org/image";
+    pub const THUMBNAIL: &str = "http://opds-spec.org/image/thumbnail";
+    pub const FACET: &str = "http://opds-spec.org/facet";
+    pub const SORT_NEW: &str = "http://opds-spec.org/sort/new";
+    pub const AUTH_DOCUMENT: &str = "http://opds-spec.org/auth/document";
+}
+
 use std::borrow::Cow;
 
 use serde::Serialize;
@@ -311,6 +324,19 @@ pub enum AvailabilityState {
     Unavailable,
     Reserved,
     Ready,
+}
+
+impl AvailabilityState {
+    /// The lowercase spelling used both as the JSON value and as the OPDS 1.x
+    /// `opds:availability` `status` attribute.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AvailabilityState::Available => "available",
+            AvailabilityState::Unavailable => "unavailable",
+            AvailabilityState::Reserved => "reserved",
+            AvailabilityState::Ready => "ready",
+        }
+    }
 }
 
 /// Lending availability of a resource.
