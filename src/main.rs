@@ -67,7 +67,10 @@ struct Cli {
 
     /// Socket address to bind (host:port). Typically an internal address
     /// behind a reverse proxy; distinct from the externally-visible base URL.
-    #[arg(long, short = 'l', env = "OPDS_LISTEN", default_value = "0.0.0.0:3000")]
+    ///
+    /// Long form only: `-l` would be ambiguous between this and
+    /// `--library-dir`, so neither takes a short option.
+    #[arg(long, env = "OPDS_LISTEN", default_value = "0.0.0.0:3000")]
     listen: SocketAddr,
 
     /// Number of publications per page in acquisition feeds.
@@ -79,7 +82,9 @@ struct Cli {
     db: PathBuf,
 
     /// Directory of EPUB files to serve (required to run the server).
-    #[arg(long, short, env = "OPDS_LIBRARY_DIR")]
+    ///
+    /// Long form only, as for `--listen` above.
+    #[arg(long, env = "OPDS_LIBRARY_DIR")]
     library_dir: Option<PathBuf>,
 
     /// Maximum admin upload size, in MiB. Keep this at or below any reverse
