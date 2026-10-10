@@ -122,6 +122,13 @@ enum Command {
     RemoveCategory { id: String, slug: String },
     /// Remove a book from the catalog.
     RemoveBook { id: String },
+    /// Fill in series metadata from each book's file, where none is recorded.
+    ///
+    /// Series parsing arrived after the schema, and scanning skips unchanged
+    /// files, so a library ingested before then has no series to browse.
+    /// Books that already have one (including hand-edited ones) are left
+    /// alone.
+    BackfillSeries,
     /// Re-derive categories for every book already in the catalog.
     ///
     /// Scanning only seeds categories for newly-added books, so this is how a
@@ -209,6 +216,19 @@ async fn run_command(
                 println!("removed book '{id}'");
             } else {
                 anyhow::bail!("no such book: {id}");
+            }
+        }
+        Command::BackfillSeries => {
+            let report = store.backfill_series().await;
+            println!(
+                "filled {} series from book files ({} already had one)",
+                report.filled, report.already_set
+            );
+            if report.unreadable > 0 {
+                println!("{} book files could not be read", report.unreadable);
+            }
+            for (series, count) in &report.by_series {
+                println!("  {count:>4}  {series}");
             }
         }
         Command::Recategorize { prune } => {
@@ -348,6 +368,7 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/opds/all", get(all_publications))
         .route("/opds/category/{slug}", get(category_feed))
         .route("/opds/authors/{slug}", get(author_feed))
+        .route("/opds/series/{slug}", get(series_feed))
         .route("/opds/publications/{id}", get(publication))
         .route(
             "/opds/publications/{id}/categories",
@@ -596,6 +617,11 @@ async fn root_feed(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         feed.groups
             .push(browse_group(base, "Browse by Author", "authors", authors));
     }
+    let series = state.catalog.series().await;
+    if !series.is_empty() {
+        feed.groups
+            .push(browse_group(base, "Browse by Series", "series", series));
+    }
 
     Opds::feed(feed)
 }
@@ -749,6 +775,33 @@ async fn author_feed(State(state): State<Arc<AppState>>, Path(slug): Path<String
     let books = state.catalog.books_by_author(&author).await;
 
     let mut feed = Feed::new(author, format!("{base}/opds/authors/{slug}"))
+        .with_link(
+            Link::new(format!("{base}/opds"))
+                .with_rel("start")
+                .with_type(FEED_MEDIA_TYPE),
+        )
+        .with_link(
+            Link::new(format!("{base}/opds/all"))
+                .with_rel("up")
+                .with_type(FEED_MEDIA_TYPE),
+        );
+
+    feed.metadata.number_of_items = Some(books.len() as u64);
+    feed.publications = books.iter().map(|b| b.to_publication(base)).collect();
+
+    Opds::feed(feed).into_response()
+}
+
+/// An acquisition feed of one series, in reading order.
+async fn series_feed(State(state): State<Arc<AppState>>, Path(slug): Path<String>) -> Response {
+    let base = &state.base_url;
+
+    let Some(series) = state.catalog.series_by_slug(&slug).await else {
+        return not_found("No such series");
+    };
+    let books = state.catalog.books_in_series(&series).await;
+
+    let mut feed = Feed::new(series, format!("{base}/opds/series/{slug}"))
         .with_link(
             Link::new(format!("{base}/opds"))
                 .with_rel("start")
@@ -2594,6 +2647,285 @@ mod tests {
             .map(|c| c.slug.0)
             .collect();
         assert_eq!(cats, ["fiction"]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // --- Series browse ---
+
+    /// An app whose sample catalog has series assigned. The sample books carry
+    /// no series of their own, so the browse has nothing to show otherwise.
+    ///
+    /// "Sea Tales" is deliberately arranged so reading order and title order
+    /// disagree, and one of its books has no recorded position.
+    async fn series_app() -> Router {
+        let store = CatalogStore::new(db::connect_memory().await.unwrap());
+        store.reset_to_samples().await;
+        store
+            .set_series("moby-dick", Some("Sea Tales"), Some(2.0))
+            .await
+            .unwrap();
+        store
+            .set_series("the-art-of-war", Some("Sea Tales"), Some(1.0))
+            .await
+            .unwrap();
+        store
+            .set_series("frankenstein", Some("Sea Tales"), None)
+            .await
+            .unwrap();
+        // A name whose slug and XML escaping both matter.
+        store
+            .set_series("pride-and-prejudice", Some("Austen & Co"), Some(1.0))
+            .await
+            .unwrap();
+        app(Arc::new(AppState {
+            base_url: BASE.to_string(),
+            page_size: DEFAULT_PAGE_SIZE,
+            catalog: Arc::new(store),
+            auth: None,
+            library_dir: None,
+            max_upload_bytes: 64 * 1024 * 1024,
+        }))
+    }
+
+    async fn series_get(uri: &str) -> (StatusCode, String, Vec<u8>) {
+        let response = series_app()
+            .await
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, content_type, bytes.to_vec())
+    }
+
+    #[tokio::test]
+    async fn series_browse_group_lists_every_series() {
+        let (status, content_type, bytes) = series_get("/opds").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type, FEED_MEDIA_TYPE);
+        let json: Value = serde_json::from_slice(&bytes).unwrap();
+
+        let group = json["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["metadata"]["title"] == "Browse by Series")
+            .expect("a Browse by Series group");
+        let titles: Vec<&str> = group["navigation"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["title"].as_str().unwrap())
+            .collect();
+        assert_eq!(titles, ["Austen & Co", "Sea Tales"]);
+        assert_eq!(
+            group["navigation"][0]["href"],
+            format!("{BASE}/opds/series/austen-co")
+        );
+    }
+
+    #[tokio::test]
+    async fn series_feed_is_ordered_by_position_not_title() {
+        let (status, content_type, bytes) = series_get("/opds/series/sea-tales").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type, FEED_MEDIA_TYPE);
+        let json: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(json["metadata"]["title"], "Sea Tales");
+        assert_eq!(json["metadata"]["numberOfItems"], 3);
+
+        let titles: Vec<&str> = json["publications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["metadata"]["title"].as_str().unwrap())
+            .collect();
+        // Position 1 before position 2, even though the titles sort the other
+        // way; the book with no position sorts last.
+        assert_eq!(
+            titles,
+            [
+                "The Art of War",
+                "Moby-Dick; or, The Whale",
+                "Frankenstein; or, The Modern Prometheus"
+            ]
+        );
+        // The position travels with each publication.
+        assert_eq!(
+            json["publications"][0]["metadata"]["belongsTo"]["series"]["position"],
+            1.0
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_series_404s() {
+        let (status, _, _) = series_get("/opds/series/no-such-series").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn opds1_series_index_lists_series_with_counts() {
+        let (status, content_type, bytes) = series_get("/opds1/series").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type, atom::NAVIGATION_MEDIA_TYPE);
+
+        let body = String::from_utf8(bytes).unwrap();
+        let doc = xml(&body);
+        let titles: Vec<String> = entries(&doc)
+            .iter()
+            .map(|e| child_text(*e, "title"))
+            .collect();
+        assert_eq!(titles, ["Austen & Co", "Sea Tales"]);
+
+        // An ampersand in a series name must be escaped on the wire and
+        // recovered by a parser.
+        assert!(body.contains("Austen &amp; Co"));
+
+        let sea = entries(&doc)
+            .into_iter()
+            .find(|e| child_text(*e, "title") == "Sea Tales")
+            .unwrap();
+        let link = child(sea, "link");
+        assert_eq!(
+            link.attribute("href"),
+            Some(format!("{BASE}/opds1/series/sea-tales").as_str())
+        );
+        assert_eq!(
+            link.attribute(("http://purl.org/syndication/thread/1.0", "count")),
+            Some("3")
+        );
+    }
+
+    #[tokio::test]
+    async fn opds1_series_feed_is_ordered_and_linked_to_its_index() {
+        let (status, content_type, bytes) = series_get("/opds1/series/sea-tales").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type, atom::ACQUISITION_MEDIA_TYPE);
+
+        let body = String::from_utf8(bytes).unwrap();
+        let doc = xml(&body);
+        let root = doc.root_element();
+
+        assert_eq!(child_text(root, "title"), "Sea Tales");
+        assert_eq!(child_text(root, "totalResults"), "3");
+        let titles: Vec<String> = entries(&doc)
+            .iter()
+            .map(|e| child_text(*e, "title"))
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                "The Art of War",
+                "Moby-Dick; or, The Whale",
+                "Frankenstein; or, The Modern Prometheus"
+            ]
+        );
+        // `up` leads to the series index, not the flat feed.
+        assert_eq!(link_href(root, "up"), format!("{BASE}/opds1/series"));
+        // The position rides along on each entry.
+        let first = entries(&doc)[0];
+        let series = child(first, "Series");
+        assert_eq!(series.attribute("name"), Some("Sea Tales"));
+        assert_eq!(series.attribute("position"), Some("1"));
+
+        let (status, _, _) = series_get("/opds1/series/nope").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // With no series anywhere, neither catalog advertises the browse.
+    #[tokio::test]
+    async fn series_browse_is_omitted_when_no_book_has_a_series() {
+        let (_, _, json) = get("/opds").await;
+        assert!(
+            !json["groups"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|g| g["metadata"]["title"] == "Browse by Series")
+        );
+
+        let (_, _, body) = get_xml("/opds1").await;
+        let doc = xml(&body);
+        assert!(
+            !entries(&doc)
+                .iter()
+                .any(|e| child_text(*e, "title") == "Browse by Series")
+        );
+    }
+
+    // A library ingested before series parsing existed has the columns but no
+    // values, and nothing to browse. The backfill reads the files again.
+    #[tokio::test]
+    async fn backfill_series_fills_gaps_without_clobbering_edits() {
+        use std::fs;
+
+        let dir = std::env::temp_dir().join(format!("opds-series-bf-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // Two generated EPUBs carrying Calibre series metadata.
+        let samples = CatalogStore::new(db::connect_memory().await.unwrap());
+        samples.reset_to_samples().await;
+        let mut first = samples.get("moby-dick").await.unwrap();
+        first.series = Some("Sea Tales".to_string());
+        first.series_index = Some(2.0);
+        let mut second = samples.get("the-art-of-war").await.unwrap();
+        second.series = Some("Sea Tales".to_string());
+        second.series_index = Some(1.0);
+        fs::write(dir.join("a.epub"), assets::epub_bytes(&first)).unwrap();
+        fs::write(dir.join("b.epub"), assets::epub_bytes(&second)).unwrap();
+
+        let store = CatalogStore::new(db::connect_memory().await.unwrap());
+        store.reconcile_dir(&dir).await;
+        assert_eq!(store.count().await, 2);
+
+        // Rewind to a pre-series-parsing catalog, then hand-edit one book the
+        // way the admin UI would.
+        for book in store.all().await {
+            store.set_series(book.id.as_str(), None, None).await.unwrap();
+        }
+        let edited = store
+            .all()
+            .await
+            .into_iter()
+            .find(|b| b.title.contains("Moby"))
+            .unwrap();
+        store
+            .set_series(edited.id.as_str(), Some("My Own Shelf"), Some(9.0))
+            .await
+            .unwrap();
+        assert!(store.series().await.iter().any(|(s, _)| s.label == "My Own Shelf"));
+
+        let report = store.backfill_series().await;
+        assert_eq!(report.filled, 1, "only the book with no series");
+        assert_eq!(report.already_set, 1, "the hand-edited one was skipped");
+
+        // The gap is filled from the file; the hand edit survives untouched.
+        let books = store.all().await;
+        let find = |needle: &str| {
+            books
+                .iter()
+                .find(|b| b.title.contains(needle))
+                .expect("the book")
+        };
+        let filled = find("Art of War");
+        assert_eq!(filled.series.as_deref(), Some("Sea Tales"));
+        assert_eq!(filled.series_index, Some(1.0));
+        let kept = find("Moby");
+        assert_eq!(kept.series.as_deref(), Some("My Own Shelf"));
+        assert_eq!(kept.series_index, Some(9.0));
+
+        // Re-running changes nothing further.
+        let report = store.backfill_series().await;
+        assert_eq!(report.filled, 0);
+        assert_eq!(report.already_set, 2);
 
         let _ = fs::remove_dir_all(&dir);
     }

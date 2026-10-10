@@ -99,6 +99,7 @@ nothing version-specific about them.
 | `GET /opds/all?page=N`         | Paginated **acquisition** feed of all publications, with facets and pagination links. |
 | `GET /opds/category/{slug}`    | Acquisition feed for a category.                        |
 | `GET /opds/authors/{slug}`     | Acquisition feed for an author.                         |
+| `GET /opds/series/{slug}`      | Acquisition feed for a series, in reading order.         |
 | `GET /opds/publications/{id}`  | A single publication document.                          |
 | `GET /opds/publications/{id}/categories` | JSON list of a publication's categories.      |
 | `POST /opds/publications/{id}/categories` | Assign a category: `{"name": "Sci-Fi"}` (created on demand). |
@@ -116,6 +117,8 @@ nothing version-specific about them.
 | `GET /opds1/category/{slug}`      | **Acquisition**: one category.                       |
 | `GET /opds1/authors`              | **Navigation**: one entry per author, with counts.   |
 | `GET /opds1/authors/{slug}`       | **Acquisition**: one author.                         |
+| `GET /opds1/series`               | **Navigation**: one entry per series, with counts.   |
+| `GET /opds1/series/{slug}`        | **Acquisition**: one series, in reading order.       |
 | `GET /opds1/publications/{id}`    | A single "complete entry" document.                  |
 | `GET /opds1/search?query=...`     | **Acquisition**: search results (same filters as 2.0). |
 | `GET /opds1/opensearch.xml`       | The OpenSearch description document.                 |
@@ -150,7 +153,10 @@ groups that the 2.0 root feed inlines become navigation feeds of their own at
   (thumbnails are downscaled to fit 160x240 and re-encoded as JPEG) or as a
   generated SVG placeholder.
 - Series metadata (`belongsTo.series` with `name`/`position`), read from EPUB
-  Calibre or EPUB3 collection metadata and editable in the admin UI.
+  Calibre or EPUB3 collection metadata and editable in the admin UI, with a
+  **Browse by Series** group and per-series feeds. A series feed is ordered by
+  position rather than title — that being the point of browsing a series — and
+  a book with no recorded position sorts after the numbered ones.
 - A templated `search` link (`search{?query,author,title}`) and a search
   endpoint supporting a general query plus per-field author/title filters.
 - Pagination on the acquisition feed: `numberOfItems`/`itemsPerPage`/`currentPage`
@@ -261,6 +267,29 @@ Hand-assigned categories are never touched. `--prune` only removes a blanket
 guess that the current rules no longer derive for that book, so a book that
 really does live in `Fiction/` keeps it.
 
+## Series
+
+Series come from each book's own metadata, so browsing them needs nothing
+external. Because series parsing arrived after the schema did, and scanning
+skips files whose mtime has not changed, a library ingested before then has
+the columns but no values — and so nothing to browse. `backfill-series` reads
+each book's file again and fills the gap:
+
+```sh
+cargo run -- backfill-series
+```
+
+Only books with no series recorded are touched, so a value edited in the admin
+UI is never clobbered, and re-running is a no-op. It needs no library
+directory: each book's file path is already stored.
+
+Series names are used exactly as the files spell them. A collection whose
+files disagree — `Discworld`, `Discworld Series` and `Discworld Novels` all
+appearing — browses as that many separate series; the admin UI's series field
+is the place to reconcile them, since guessing which names mean the same
+series is exactly the kind of silent wrong answer this project avoids
+elsewhere.
+
 ## Management subcommands
 
 Besides `adduser`, the binary offers subcommands for editing the catalog
@@ -273,6 +302,7 @@ cargo run -- add-category <id> "Science Fiction"   # created on demand
 cargo run -- remove-category <id> <category-slug>
 cargo run -- remove-book <id>
 cargo run -- recategorize [--prune]   # re-derive categories (needs the library dir)
+cargo run -- backfill-series          # fill in series from book files
 ```
 
 Note: for file-backed books, edits to title/author persist until the EPUB file

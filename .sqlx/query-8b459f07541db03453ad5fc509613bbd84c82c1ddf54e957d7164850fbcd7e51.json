@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, title, author, language, description, modified,\n                    series, series_index, price_cents, lendable, cover_zip_path, cover_media_type\n             FROM books WHERE series = ?\n             ORDER BY series_index IS NULL, series_index, title COLLATE NOCASE",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "title",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "author",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "language",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "modified",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "series",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "series_index",
+        "ordinal": 7,
+        "type_info": "Float"
+      },
+      {
+        "name": "price_cents",
+        "ordinal": 8,
+        "type_info": "Integer"
+      },
+      {
+        "name": "lendable",
+        "ordinal": 9,
+        "type_info": "Integer"
+      },
+      {
+        "name": "cover_zip_path",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "cover_media_type",
+        "ordinal": 11,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "8b459f07541db03453ad5fc509613bbd84c82c1ddf54e957d7164850fbcd7e51"
+}
