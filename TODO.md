@@ -1,3 +1,117 @@
+# Category derivation (Tier 0 — no external API) — DONE
+
+Browsing was useless: 192 books, 97% of them in `Fiction` (141) or
+`Non-Fiction` (51). Two causes, both fixed without touching the network.
+
+**1. The library's own folder layout was being discarded.** `derive_category`
+only recognized a top-level `Fiction`/`Non-Fiction` folder, so `Cook Books`,
+`Programming`, `D&D 5e` and `french` (41 books) fell through to the subject
+heuristic and all landed in Non-Fiction. The top-level subfolder is now a
+category whatever it is named.
+
+**2. Books' own `dc:subject` values were only used as a fiction/non-fiction
+hint.** 32% of the library has subjects, and the Pratchett bulk self-labels as
+`Fantasy` (48) and `Discworld` (46). `src/subjects.rs` now normalizes them
+onto a small fixed genre set.
+
+Measured on the real catalog (against copies; `opds.db` untouched):
+
+    before:  5 categories — Fiction 141, Non-Fiction 51, fantasy 2, WoT 2, discworld 1
+    after : 17 categories — Fiction 141, fantasy 55, D&D 5e 15, Non-Fiction 14,
+                            Programming 12, Cook Books 10, Adventure 5, French 3,
+                            Humor 2, WoT 2, Children's 1, discworld 1, Horror 1,
+                            Romance 1, Science Fiction 1, Thriller 1, Young Adult 1
+
+`recategorize` applied 109 additions and pruned 40 stale blanket guesses.
+Non-Fiction went 51 -> 14 as books moved to their real homes. No book is
+uncategorized.
+
+Decisions worth keeping:
+
+- **Unrecognized subjects are dropped, never guessed.** Real subject lists are
+  full of true-but-unbrowsable noise (`New York Times bestseller`, `Large type
+  books`, `Rincewind the wizard (fictitious character)`). Same reasoning as
+  the earlier decision not to guess an author from the folder path: a silent
+  wrong category is worse than a broad right one. Widening the taxonomy means
+  adding to `SUBJECT_MAP`.
+- **Whole-term matching, not substrings** — otherwise `Science Fiction` files
+  under `Science`. Every multi-word variant is spelled out in the map.
+- **`Fiction`/`Non-Fiction` keep their historical slugs.** Caught by an
+  existing test: slugifying the folder name mints `non-fiction` beside the
+  stored `nonfiction`, splitting one browse entry into two identically-
+  labelled halves. `canonical_category` pins both spellings, and
+  `assign_category` now routes through it too — so typing "Non-Fiction" in the
+  admin page no longer creates a duplicate either. That second one was a live
+  bug on main, not something this change introduced.
+- **A folder named after the book's own author is skipped**, or a library laid
+  out as `Books/<Author>/*.epub` would mint a category per author and duplicate
+  the author browse feed.
+- **Directory matching is by filesystem identity, not spelling.** macOS
+  firmlinks give one directory two equally-real absolute paths (`/Users/...`
+  and `/System/Volumes/Data/Users/...`) and `canonicalize` reconciles neither
+  — it returns each unchanged. Book paths come from the DB while the library
+  directory comes from a flag, so the two spellings meet routinely. The first
+  implementation used `canonicalize` and silently derived zero folder
+  categories against the real library; `relative_to` now falls back to
+  comparing `(dev, ino)` while walking up from the file.
+- **`recategorize` adds; `--prune` is opt-in and narrow.** Hand-assigned
+  categories are never touched, and a blanket guess is removed only when the
+  current rules no longer derive it for that book — so a book genuinely in
+  `Fiction/` keeps `Fiction`.
+- Built entirely from existing queries, so the `.sqlx` cache needed no
+  regeneration and there is no migration.
+
+Known cosmetic wart: the pre-existing hand-made `fantasy` category keeps its
+lowercase label (`seed_category` is `INSERT OR IGNORE`, so the stored label
+wins) and now shows as `fantasy` next to `Fiction` and `D&D 5e`. Deliberately
+not clobbered — it is a label the owner typed. A one-line change in
+`recategorize` could upgrade case-only label differences if wanted.
+
+## Next lever for the 141-book Fiction pile (not done)
+
+`Discworld` appears as a subject on 46 books and is a *series*, not a
+category — and series metadata is already parsed, stored and on the wire
+(`belongsTo.series`) with no browse feed over it. A "Browse by Series" group
+plus `/opds/series/{slug}` would split the biggest bucket using data already
+in the database, again with no external API. Probably worth more than Tier 1.
+
+## Tier 1 (external API) — researched, not built
+
+Measured on 15 real books, matching by ISBN:
+
+| Service | Key? | Hit rate | Returns |
+| --- | --- | --- | --- |
+| Open Library | no | 12/15 | subjects, long-tail and noisy |
+| LC SRU (`lx2.loc.gov:210/LCDB`) | no | 4/15 (3 with a usable LCC class) | LCSH + LCC, controlled, high quality |
+| Google Books | yes, in practice | untested | BISAC categories, few and clean |
+| Goodreads | unobtainable | n/a | n/a |
+
+- **Goodreads is dead**: the endpoint answers only `Invalid API key`, and new
+  keys stopped being issued in Dec 2020.
+- **`loc.gov/apis` is the right index**, but its main JSON API "does not
+  include records from the library catalog" — digitized items only, so it
+  cannot resolve a commercial EPUB by ISBN. The catalog lives behind SRU, and
+  LCSH/LCC behind the Linked Data Service (`id.loc.gov`).
+- LC's low hit rate is structural: LC catalogs *print* editions and these are
+  ebook ISBNs. Also `050` is not always a class — Hogfather's came back as
+  `CPB Box no. 1955 vol. 14`, a shelf location, so it needs validating
+  against `^[A-Z]{1,3}[0-9]`.
+- **Google Books keyless is unusable**: the anonymous quota is shared and
+  already exhausted (HTTP 429, `project_number:624717413613`). A key gets its
+  own 1k/day.
+- Prerequisite either way: **persist the ISBN**. `EpubMeta.identifier` is
+  already parsed from `dc:identifier` and then thrown away — 71% of the
+  library (137/191) has a real ISBN in it, and it is the only reliable join
+  key. Not in `Book`, not in the schema.
+- Prerequisite for any title+author fallback: author cleanup. `Terry
+  Pratchett` (55) and `Pratchett, Terry` (9) are one person, and `HTML to
+  Epub` (14) is a conversion artifact that will match nothing.
+- Shape if built: a "Suggest categories" button per book in the admin page →
+  Open Library for coverage, LC for an LCC class when present → normalize
+  through `subjects.rs` → render as clickable chips the owner confirms. Never
+  auto-apply: the whole point of the normalization decision above is that
+  wrong categories are worse than broad ones.
+
 # OPDS 1.x support — DONE
 
 OPDS 1.2 is served under `/opds1`, alongside the existing OPDS 2.0 catalog at

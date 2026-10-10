@@ -25,6 +25,7 @@ mod epub;
 mod library;
 mod model;
 mod opds1;
+mod subjects;
 mod watch;
 mod xtc;
 
@@ -121,6 +122,17 @@ enum Command {
     RemoveCategory { id: String, slug: String },
     /// Remove a book from the catalog.
     RemoveBook { id: String },
+    /// Re-derive categories for every book already in the catalog.
+    ///
+    /// Scanning only seeds categories for newly-added books, so this is how a
+    /// change to the derivation rules reaches an existing library. Requires
+    /// the library directory (each book's file is re-read for its subjects).
+    Recategorize {
+        /// Also clear the blanket "Fiction"/"Non-Fiction" guess off a book
+        /// when a more specific category was derived for it.
+        #[arg(long)]
+        prune: bool,
+    },
 }
 
 /// Shared application state.
@@ -145,12 +157,16 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command.take() {
         None => run_server(cli).await,
-        Some(command) => run_command(&cli.db, command).await,
+        Some(command) => run_command(&cli.db, cli.library_dir.clone(), command).await,
     }
 }
 
 /// Run a management subcommand against the database and exit.
-async fn run_command(db_path: &FsPath, command: Command) -> anyhow::Result<()> {
+async fn run_command(
+    db_path: &FsPath,
+    library_dir: Option<PathBuf>,
+    command: Command,
+) -> anyhow::Result<()> {
     if let Command::Adduser { username, password } = command {
         return cmd_adduser(db_path, &username, password).await;
     }
@@ -193,6 +209,28 @@ async fn run_command(db_path: &FsPath, command: Command) -> anyhow::Result<()> {
                 println!("removed book '{id}'");
             } else {
                 anyhow::bail!("no such book: {id}");
+            }
+        }
+        Command::Recategorize { prune } => {
+            let dir = library_dir.context(
+                "a library directory is required to re-read subjects:                  set OPDS_LIBRARY_DIR or --library-dir",
+            )?;
+            let report = store.recategorize(&dir, prune).await;
+            println!(
+                "re-read {} books: {} categories added, {} blanket guesses pruned",
+                report.books, report.added, report.pruned
+            );
+            if report.unreadable > 0 {
+                println!("{} book files could not be read", report.unreadable);
+            }
+            for (label, count) in &report.by_category {
+                println!("  {count:>4}  {label}");
+            }
+            if !prune && report.added > 0 {
+                println!(
+                    "\nBooks keep the categories they already had. Re-run with --prune to \n\
+                     drop the blanket Fiction/Non-Fiction guess where a better one was found."
+                );
             }
         }
     }
@@ -2460,5 +2498,103 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // A library ingested under the old rules has only the blanket guess.
+    // `recategorize` is what applies a change to the derivation rules to it,
+    // and `--prune` is what clears the stale guess back out.
+    #[tokio::test]
+    async fn recategorize_adds_folder_categories_and_prunes_the_blanket_guess() {
+        use std::fs;
+
+        let dir = std::env::temp_dir().join(format!("opds-recat-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("Cook Books")).unwrap();
+
+        let samples = CatalogStore::new(db::connect_memory().await.unwrap());
+        samples.reset_to_samples().await;
+        let book = samples.get("the-art-of-war").await.unwrap();
+        fs::write(
+            dir.join("Cook Books/b.epub"),
+            assets::epub_bytes(&book),
+        )
+        .unwrap();
+
+        let store = CatalogStore::new(db::connect_memory().await.unwrap());
+        store.reconcile_dir(&dir).await;
+        let id = store.all().await.first().expect("a book").id.clone();
+
+        // Rewind to what the old rules would have produced: the blanket guess,
+        // plus a category the owner assigned by hand.
+        store.remove_category(id.as_str(), "cook-books").await;
+        store.assign_category(id.as_str(), "Non-Fiction").await.unwrap();
+        store.assign_category(id.as_str(), "Strategy").await.unwrap();
+
+        let slugs = |cats: Vec<catalog::Category>| {
+            let mut v: Vec<String> = cats.into_iter().map(|c| c.slug.0).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            slugs(store.book_categories(id.as_str()).await),
+            ["nonfiction", "strategy"]
+        );
+
+        // Without prune: the folder category is added, nothing is taken away.
+        let report = store.recategorize(&dir, false).await;
+        assert_eq!(report.books, 1);
+        assert_eq!(report.added, 1);
+        assert_eq!(report.pruned, 0);
+        assert_eq!(
+            slugs(store.book_categories(id.as_str()).await),
+            ["cook-books", "nonfiction", "strategy"]
+        );
+
+        // Re-running is idempotent: everything derived is already present.
+        let report = store.recategorize(&dir, false).await;
+        assert_eq!(report.added, 0);
+
+        // With prune: the blanket guess goes, because it is not among what was
+        // derived — but the hand-assigned category is untouched.
+        let report = store.recategorize(&dir, true).await;
+        assert_eq!(report.pruned, 1);
+        assert_eq!(
+            slugs(store.book_categories(id.as_str()).await),
+            ["cook-books", "strategy"]
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // A book whose folder IS its blanket category must keep it: pruning only
+    // removes a guess that the current rules no longer produce.
+    #[tokio::test]
+    async fn recategorize_keeps_a_blanket_category_it_still_derives() {
+        use std::fs;
+
+        let dir = std::env::temp_dir().join(format!("opds-recat-keep-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("Fiction")).unwrap();
+
+        let samples = CatalogStore::new(db::connect_memory().await.unwrap());
+        samples.reset_to_samples().await;
+        let book = samples.get("moby-dick").await.unwrap();
+        fs::write(dir.join("Fiction/a.epub"), assets::epub_bytes(&book)).unwrap();
+
+        let store = CatalogStore::new(db::connect_memory().await.unwrap());
+        store.reconcile_dir(&dir).await;
+        let id = store.all().await.first().expect("a book").id.clone();
+
+        let report = store.recategorize(&dir, true).await;
+        assert_eq!(report.pruned, 0);
+        let cats: Vec<String> = store
+            .book_categories(id.as_str())
+            .await
+            .into_iter()
+            .map(|c| c.slug.0)
+            .collect();
+        assert_eq!(cats, ["fiction"]);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
