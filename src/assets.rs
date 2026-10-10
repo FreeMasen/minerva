@@ -59,6 +59,22 @@ fn content_opf(book: &Book) -> String {
         .as_ref()
         .map(jiff::Timestamp::to_string)
         .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string());
+    // Series, in the flat Calibre spelling the scanner reads back.
+    let series = match (&book.series, book.series_index) {
+        (Some(name), index) => {
+            let mut out = format!(
+                "\n    <meta name=\"calibre:series\" content=\"{}\"/>",
+                xml_escape(name)
+            );
+            if let Some(index) = index {
+                out.push_str(&format!(
+                    "\n    <meta name=\"calibre:series_index\" content=\"{index}\"/>"
+                ));
+            }
+            out
+        }
+        (None, _) => String::new(),
+    };
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id">
@@ -67,7 +83,7 @@ fn content_opf(book: &Book) -> String {
     <dc:title>{title}</dc:title>
     <dc:creator>{author}</dc:creator>
     <dc:language>{language}</dc:language>
-    <meta property="dcterms:modified">{modified}</meta>
+    <meta property="dcterms:modified">{modified}</meta>{series}
   </metadata>
   <manifest>
     <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
@@ -81,6 +97,7 @@ fn content_opf(book: &Book) -> String {
         id = book.id,
         language = book.language.as_deref().unwrap_or("en"),
         modified = modified,
+        series = series,
     )
 }
 

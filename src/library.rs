@@ -84,6 +84,19 @@ pub struct CatalogStore {
     pool: SqlitePool,
 }
 
+/// What a [`CatalogStore::backfill_series`] pass changed.
+#[derive(Debug, Default)]
+pub struct SeriesBackfill {
+    /// Books given a series from their file.
+    pub filled: u64,
+    /// Books left alone because they already had one.
+    pub already_set: u64,
+    /// Books whose file could not be read.
+    pub unreadable: u64,
+    /// How many books each series gained.
+    pub by_series: std::collections::BTreeMap<String, u64>,
+}
+
 /// What a [`CatalogStore::recategorize`] pass changed.
 #[derive(Debug, Default)]
 pub struct Recategorized {
@@ -399,6 +412,118 @@ impl CatalogStore {
                 .collect()
         })
         .unwrap_or_default()
+    }
+
+    /// Fill in series metadata from each book's own file, for books that have
+    /// none recorded.
+    ///
+    /// Series parsing arrived after the schema did, and scanning skips files
+    /// whose mtime has not changed, so a library ingested before then has the
+    /// columns but no values — and nothing to browse. This reads each book's
+    /// file again and fills the gap.
+    ///
+    /// Only books with no series recorded are touched, so a value edited in
+    /// the admin UI is never clobbered. Needs no library directory: each
+    /// book's file path is already stored.
+    pub async fn backfill_series(&self) -> SeriesBackfill {
+        let mut report = SeriesBackfill::default();
+
+        for book in self.all().await {
+            if book.series.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+                report.already_set += 1;
+                continue;
+            }
+            let BookSource::Files(files) = &book.source else {
+                continue;
+            };
+            let Some(file) = files.first() else {
+                continue;
+            };
+            let meta = match file.format.read_meta(&file.path) {
+                Ok(meta) => meta,
+                Err(err) => {
+                    tracing::warn!(?err, path = %file.path.display(), "cannot re-read book file");
+                    report.unreadable += 1;
+                    continue;
+                }
+            };
+            let Some(series) = meta.series.as_deref().map(str::trim).filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+
+            match self
+                .set_series(book.id.as_str(), Some(series), meta.series_index)
+                .await
+            {
+                Ok(true) => {
+                    report.filled += 1;
+                    *report.by_series.entry(series.to_string()).or_default() += 1;
+                }
+                Ok(false) => {}
+                Err(err) => tracing::error!(?err, id = %book.id, "failed to set series"),
+            }
+        }
+        report
+    }
+
+    /// Every series in the catalog with its book count, ordered by name.
+    ///
+    /// Shaped like [`Self::authors`] — a `Category` of slug + label — so the
+    /// same browse-group and navigation-feed builders serve all three axes.
+    pub async fn series(&self) -> Vec<(Category, u64)> {
+        sqlx::query!(
+            r#"SELECT series AS "series!", COUNT(*) AS "count!: i64"
+               FROM books
+               WHERE series IS NOT NULL AND TRIM(series) <> ''
+               GROUP BY series ORDER BY series COLLATE NOCASE"#
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(|r| {
+                    (
+                        Category::new(catalog::slugify(&r.series), r.series),
+                        r.count as u64,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// The series name matching a slug, if any.
+    pub async fn series_by_slug(&self, slug: &str) -> Option<String> {
+        sqlx::query_scalar!(
+            r#"SELECT DISTINCT series AS "series!"
+               FROM books WHERE series IS NOT NULL AND TRIM(series) <> ''"#
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|series| catalog::slugify(series) == slug)
+    }
+
+    /// All books in a series, in reading order.
+    ///
+    /// Ordered by position within the series rather than by title — that is
+    /// the whole point of browsing a series. A book with no recorded position
+    /// sorts after the numbered ones.
+    pub async fn books_in_series(&self, series: &str) -> Vec<Book> {
+        let rows = sqlx::query_as!(
+            BookRow,
+            "SELECT id, title, author, language, description, modified,
+                    series, series_index, price_cents, lendable, cover_zip_path, cover_media_type
+             FROM books WHERE series = ?
+             ORDER BY series_index IS NULL, series_index, title COLLATE NOCASE",
+            series
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        self.hydrate(rows).await
     }
 
     /// The author name matching a slug, if any.

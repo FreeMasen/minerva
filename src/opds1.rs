@@ -40,6 +40,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/opds1/category/{slug}", get(category_feed))
         .route("/opds1/authors", get(author_index))
         .route("/opds1/authors/{slug}", get(author_feed))
+        .route("/opds1/series", get(series_index))
+        .route("/opds1/series/{slug}", get(series_feed))
         .route("/opds1/publications/{id}", get(publication))
         .route("/opds1/search", get(search))
         .route("/opds1/opensearch.xml", get(opensearch))
@@ -281,6 +283,14 @@ async fn root(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             FeedKind::Navigation,
         ));
     }
+    if !state.catalog.series().await.is_empty() {
+        feed.entries.push(nav_entry(
+            format!("{base}/opds1/series"),
+            "Browse by Series",
+            "Titles grouped by series, in reading order.",
+            FeedKind::Navigation,
+        ));
+    }
 
     Atom::feed(feed)
 }
@@ -450,6 +460,56 @@ async fn author_index(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .collect();
 
     Atom::feed(feed)
+}
+
+/// A navigation feed listing every series.
+async fn series_index(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let base = &state.base_url;
+    let mut feed = atom::Feed::new(
+        FeedKind::Navigation,
+        format!("{base}/opds1/series"),
+        "Browse by Series",
+    )
+    .with_link(start_link(base))
+    .with_link(up_link(base, ""));
+
+    feed.entries = state
+        .catalog
+        .series()
+        .await
+        .into_iter()
+        .map(|(series, count)| {
+            count_entry(
+                format!("{base}/opds1/series/{}", series.slug),
+                &series.label,
+                count,
+            )
+        })
+        .collect();
+
+    Atom::feed(feed)
+}
+
+/// An acquisition feed of one series, in reading order.
+async fn series_feed(State(state): State<Arc<AppState>>, Path(slug): Path<String>) -> Response {
+    let base = &state.base_url;
+
+    let Some(series) = state.catalog.series_by_slug(&slug).await else {
+        return not_found("No such series");
+    };
+    let books = state.catalog.books_in_series(&series).await;
+
+    let mut feed = atom::Feed::new(
+        FeedKind::Acquisition,
+        format!("{base}/opds1/series/{slug}"),
+        series,
+    )
+    .with_link(start_link(base))
+    .with_link(up_link(base, "/series"));
+
+    feed.counts = Some(complete_counts(books.len() as u64));
+    feed.entries = books.iter().map(|book| entry_for(book, base)).collect();
+    Atom::feed(feed).into_response()
 }
 
 /// An acquisition feed of everything by a single author.

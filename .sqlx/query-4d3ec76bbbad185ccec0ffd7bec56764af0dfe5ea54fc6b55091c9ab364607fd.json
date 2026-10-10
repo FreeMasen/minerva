@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT series AS \"series!\"\n               FROM books WHERE series IS NOT NULL AND TRIM(series) <> ''",
+  "describe": {
+    "columns": [
+      {
+        "name": "series!",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "4d3ec76bbbad185ccec0ffd7bec56764af0dfe5ea54fc6b55091c9ab364607fd"
+}

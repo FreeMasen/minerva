@@ -1,3 +1,50 @@
+# Browse by Series — DONE
+
+The next lever on the 141-book `Fiction` pile, and it needed no external API:
+series metadata was already parsed, stored and on the wire (`belongsTo.series`)
+with no browse feed over it.
+
+- `CatalogStore::series` / `series_by_slug` / `books_in_series`, shaped like the
+  author trio so `browse_group` and `count_entry` serve all three axes.
+- OPDS 2.0: a "Browse by Series" root group plus `/opds/series/{slug}`.
+- OPDS 1.x: `/opds1/series` navigation index plus `/opds1/series/{slug}`.
+- Series feeds are ordered **by position, not title** (`ORDER BY series_index
+  IS NULL, series_index, title`), so a book with no recorded position sorts
+  after the numbered ones. This is the only ordering that makes a series feed
+  worth having.
+- New queries, so `.sqlx` was regenerated (`cargo sqlx prepare`); offline build
+  verified with `DATABASE_URL` unset.
+
+## The feature was dead on arrival without a backfill
+
+The real catalog had **zero** series rows while **50 of its EPUBs carry
+`calibre:series`** — Discworld 37, Short Stories 6, Johnny Maxwell 3, The
+Science of Discworld 2, plus two variant spellings. Series parsing arrived
+after migration `0005_series.sql`, and `reconcile_dir` skips files whose mtime
+has not changed, so already-ingested books never picked it up. Same staleness
+class as the category rules, and worth remembering as a general hazard: **any
+new metadata field needs a backfill path for existing libraries**, because
+scanning will not revisit unchanged files.
+
+`backfill-series` re-reads each book's file and fills in only what is missing,
+so admin-edited values survive and re-running is a no-op. It needs no library
+directory — the file paths are already stored. On the real catalog: 50 filled,
+0 already set, 1 unreadable (the long-standing malformed EPUB).
+
+Verified end to end: `/opds1/series/discworld` serves 37 books in reading
+order 1..37, and the 2.0 root advertises `Browse by Series` with 6 entries.
+
+Also extended `assets.rs` (test-only scaffolding) to emit `calibre:series`, so
+generated EPUBs can now exercise series round-tripping through a real scan.
+
+## Known data-quality wart (not fixed — deliberately)
+
+`Discworld` (37), `Discworld Series` (1) and `Discworld Novels` (1) browse as
+three series because that is what the files say. Normalizing them would mean
+guessing that two names denote the same series, which is the same class of
+silent-wrong-answer the subject map refuses to make. Two books edited in the
+admin UI fixes it, and nothing in the code needs to change.
+
 # Category derivation (Tier 0 — no external API) — DONE
 
 Browsing was useless: 192 books, 97% of them in `Fiction` (141) or
