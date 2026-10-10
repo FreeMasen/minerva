@@ -84,6 +84,21 @@ pub struct CatalogStore {
     pool: SqlitePool,
 }
 
+/// What a [`CatalogStore::recategorize`] pass changed.
+#[derive(Debug, Default)]
+pub struct Recategorized {
+    /// Books whose file was re-read successfully.
+    pub books: u64,
+    /// Book/category links created.
+    pub added: u64,
+    /// Blanket-guess links removed (only with `prune`).
+    pub pruned: u64,
+    /// Books whose file could not be read.
+    pub unreadable: u64,
+    /// How many books each newly-assigned category gained.
+    pub by_category: std::collections::BTreeMap<String, u64>,
+}
+
 impl CatalogStore {
     /// Wrap a shared connection pool.
     pub fn new(pool: SqlitePool) -> Self {
@@ -320,7 +335,10 @@ impl CatalogStore {
         book_id: &str,
         name: &str,
     ) -> Result<Category, sqlx::Error> {
-        let category = Category::new(catalog::slugify(name), name.trim());
+        // Through the same canonicalizer the scanner uses, so typing
+        // "Non-Fiction" by hand lands on the derived `nonfiction` category
+        // instead of minting an identically-labelled `non-fiction` beside it.
+        let category = catalog::canonical_category(name);
         self.seed_category(book_id, &category).await?;
         Ok(self
             .category(category.slug.as_str())
@@ -569,9 +587,10 @@ impl CatalogStore {
                 let id = self.free_id(&catalog::slugify(&title)).await;
                 self.create_book(&id, &work, &meta, &title, &author, rank)
                     .await;
-                let category = catalog::derive_category(dir, path, &meta.subjects);
-                if let Err(err) = self.seed_category(&id, &category).await {
-                    tracing::error!(?err, id, "failed to seed book category");
+                for category in catalog::derive_categories(dir, path, &author, &meta.subjects) {
+                    if let Err(err) = self.seed_category(&id, &category).await {
+                        tracing::error!(?err, id, slug = %category.slug, "failed to seed category");
+                    }
                 }
                 id
             }
@@ -670,6 +689,76 @@ impl CatalogStore {
     }
 
     /// Delete the file at a specific path and any book left with no files.
+    /// Re-derive categories for every book already in the store, reading each
+    /// book's own file again for its subjects.
+    ///
+    /// Scanning skips files whose mtime is unchanged and only seeds categories
+    /// for newly-created books, so a change to the derivation rules does not
+    /// reach a library that is already ingested — this applies it.
+    ///
+    /// Derived categories are *added*; hand-assigned ones are never touched.
+    /// With `prune`, the blanket fiction / non-fiction guesses
+    /// ([`catalog::BLANKET_SLUGS`]) are cleared off a book when they are not
+    /// among what was just derived for it, which is what moves a cookbook out
+    /// of "Non-Fiction" and into "Cooking".
+    pub async fn recategorize(&self, dir: &Path, prune: bool) -> Recategorized {
+        let mut report = Recategorized::default();
+
+        for book in self.all().await {
+            let BookSource::Files(files) = &book.source else {
+                continue;
+            };
+            // The first file is the richest format, so its metadata is the
+            // same one the book's title and author came from.
+            let Some(file) = files.first() else {
+                continue;
+            };
+            let meta = match file.format.read_meta(&file.path) {
+                Ok(meta) => meta,
+                Err(err) => {
+                    tracing::warn!(?err, path = %file.path.display(), "cannot re-read book file");
+                    report.unreadable += 1;
+                    continue;
+                }
+            };
+
+            report.books += 1;
+            let derived =
+                catalog::derive_categories(dir, &file.path, &book.author, &meta.subjects);
+            let existing = self.book_categories(book.id.as_str()).await;
+
+            for category in &derived {
+                if existing.iter().any(|c| c.slug == category.slug) {
+                    continue;
+                }
+                match self.seed_category(book.id.as_str(), category).await {
+                    Ok(()) => {
+                        report.added += 1;
+                        *report
+                            .by_category
+                            .entry(category.label.clone())
+                            .or_default() += 1;
+                    }
+                    Err(err) => {
+                        tracing::error!(?err, id = %book.id, "failed to seed category");
+                    }
+                }
+            }
+
+            if prune {
+                for stale in existing.iter().filter(|c| {
+                    catalog::BLANKET_SLUGS.contains(&c.slug.as_str())
+                        && !derived.iter().any(|d| d.slug == c.slug)
+                }) {
+                    self.remove_category(book.id.as_str(), stale.slug.as_str())
+                        .await;
+                    report.pruned += 1;
+                }
+            }
+        }
+        report
+    }
+
     pub async fn delete_by_path(&self, path: &Path) {
         let path = path.to_string_lossy();
         let _ = sqlx::query!("DELETE FROM book_files WHERE path = ?", path)

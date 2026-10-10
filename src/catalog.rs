@@ -212,26 +212,148 @@ pub(crate) fn book_file_paths(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Derive a book's default category when first scanned: prefer a top-level
-/// `Fiction`/`Non-Fiction` library subfolder, else classify from the EPUB's
-/// Dublin Core subjects (defaulting to non-fiction).
-pub(crate) fn derive_category(root: &Path, path: &Path, subjects: &[String]) -> Category {
-    category_from_folder(root, path).unwrap_or_else(|| classify_subjects(subjects))
+/// The categories a book is filed under when first scanned.
+///
+/// A library's own folder layout is usually its owner's taxonomy, so the
+/// top-level subfolder becomes a category whatever it is named (`Cook Books`,
+/// `Programming`, `D&D 5e`) rather than only the two names this used to
+/// recognize. The EPUB's own Dublin Core subjects add the finer genres on top,
+/// normalized by [`crate::subjects`] and silently dropped when unrecognized.
+///
+/// At least one category is always returned, so no book becomes unbrowsable:
+/// with no usable folder and no recognized subject, the broad fiction /
+/// non-fiction guess stands in.
+pub(crate) fn derive_categories(
+    root: &Path,
+    path: &Path,
+    author: &str,
+    subjects: &[String],
+) -> Vec<Category> {
+    let mut out: Vec<Category> = Vec::new();
+    let mut push = |category: Category| {
+        if !out.iter().any(|c| c.slug == category.slug) {
+            out.push(category);
+        }
+    };
+
+    if let Some(folder) = category_from_folder(root, path, author) {
+        push(folder);
+    }
+    for subject in subjects {
+        for label in crate::subjects::normalize(subject) {
+            push(canonical_category(label));
+        }
+    }
+
+    if out.is_empty() {
+        out.push(classify_subjects(subjects));
+    }
+    out
 }
 
-fn category_from_folder(root: &Path, path: &Path) -> Option<Category> {
-    let rel = path.strip_prefix(root).ok()?;
+/// The category named by the book's top-level library subfolder, if any.
+///
+/// A folder matching the book's own author is skipped: a library laid out as
+/// `Books/<Author>/<title>.epub` would otherwise mint a category per author,
+/// duplicating the author browse feed.
+fn category_from_folder(root: &Path, path: &Path, author: &str) -> Option<Category> {
+    let rel = relative_to(root, path)?;
     // Require an intervening directory component (dir + filename).
     if rel.components().count() < 2 {
         return None;
     }
     let top = rel.components().next()?.as_os_str().to_str()?;
-    match top.to_lowercase().as_str() {
-        "fiction" => Some(Category::new("fiction", "Fiction")),
-        "non-fiction" | "nonfiction" => Some(Category::new("nonfiction", "Non-Fiction")),
-        _ => None,
+    if top.trim().is_empty() || slugify(top) == slugify(author) {
+        return None;
+    }
+    Some(canonical_category(top))
+}
+
+/// `path` relative to `root`.
+///
+/// A textual strip handles the common case, where both were spelled the same
+/// way. When it fails, the two may still name the same directory: macOS
+/// firmlinks give one directory two equally-real absolute paths
+/// (`/Users/...` and `/System/Volumes/Data/Users/...`), which `canonicalize`
+/// does *not* reconcile — it returns each unchanged. Book paths come out of
+/// the database while the library directory comes from a flag, so the two
+/// spellings routinely meet here, and a silent miss would mean no folder
+/// categories at all.
+///
+/// So the fallback compares directory *identity* instead of spelling, walking
+/// up from the file until it reaches the directory that is `root`.
+fn relative_to(root: &Path, path: &Path) -> Option<PathBuf> {
+    if let Ok(rel) = path.strip_prefix(root) {
+        return Some(rel.to_path_buf());
+    }
+
+    let root_id = dir_id(root)?;
+    let mut components = Vec::new();
+    let mut current = path;
+    while let Some(parent) = current.parent() {
+        components.push(current.file_name()?);
+        if dir_id(parent) == Some(root_id) {
+            components.reverse();
+            return Some(components.into_iter().collect());
+        }
+        current = parent;
+    }
+    None
+}
+
+/// A directory's filesystem identity: the same directory reached by any path
+/// compares equal. `None` on platforms with no cheap equivalent, which only
+/// costs the identity fallback above.
+#[cfg(unix)]
+fn dir_id(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.dev(), meta.ino()))
+}
+
+#[cfg(not(unix))]
+fn dir_id(_path: &Path) -> Option<(u64, u64)> {
+    None
+}
+
+/// The category for a derived name, whether it came from a folder or a
+/// subject.
+///
+/// The two historical fiction / non-fiction spellings are pinned to the slugs
+/// already stored in existing catalogs: left to `slugify`, a `Non-Fiction`
+/// folder would mint `non-fiction` next to the stored `nonfiction` and split
+/// one browse entry into two identically-labelled halves.
+///
+/// Otherwise the name supplies its own label — an all-lowercase one is
+/// title-cased (`french` -> `French`), and anything already carrying a capital
+/// is left verbatim so names like `D&D 5e` survive intact.
+pub(crate) fn canonical_category(name: &str) -> Category {
+    let name = name.trim();
+    match name.to_lowercase().as_str() {
+        "fiction" => Category::new("fiction", "Fiction"),
+        "non-fiction" | "nonfiction" | "non fiction" => Category::new("nonfiction", "Non-Fiction"),
+        _ if name.chars().any(char::is_uppercase) => Category::new(slugify(name), name),
+        _ => {
+            let label = name
+                .split_whitespace()
+                .map(|word| {
+                    let mut chars = word.chars();
+                    match chars.next() {
+                        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                        None => String::new(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            Category::new(slugify(name), label)
+        }
     }
 }
+
+/// The category slugs this module has historically assigned as a blanket
+/// guess. `recategorize --prune` clears these off a book once a better
+/// category has been derived for it.
+pub(crate) const BLANKET_SLUGS: [&str; 2] = ["fiction", "nonfiction"];
 
 /// Whether a book's author is missing or a placeholder (Calibre exports a
 /// literal "Unknown" when the author is unset). Such authors are normalized to a
@@ -566,7 +688,8 @@ pub(crate) fn sample_books() -> Vec<(Book, Category)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_placeholder_author, slugify};
+    use super::{derive_categories, is_placeholder_author, slugify};
+    use std::path::Path;
 
     #[test]
     fn placeholder_author_detection() {
@@ -590,5 +713,91 @@ mod tests {
         // Empty/blank input still yields a usable slug.
         assert_eq!(slugify(""), "book");
         assert_eq!(slugify("   "), "book");
+    }
+
+    /// `derive_categories` against a library rooted at `/lib`.
+    fn derived(relative: &str, author: &str, subjects: &[&str]) -> Vec<String> {
+        let root = Path::new("/lib");
+        let path = root.join(relative);
+        let subjects: Vec<String> = subjects.iter().map(|s| s.to_string()).collect();
+        derive_categories(root, &path, author, &subjects)
+            .into_iter()
+            .map(|c| format!("{}={}", c.slug, c.label))
+            .collect()
+    }
+
+    #[test]
+    fn any_top_level_folder_becomes_a_category() {
+        // The whole point: not just the two names this used to recognize.
+        assert_eq!(derived("Cook Books/x.epub", "A", &[]), ["cook-books=Cook Books"]);
+        assert_eq!(derived("Programming/x.epub", "A", &[]), ["programming=Programming"]);
+        // An owner's capitalization survives rather than being mangled.
+        assert_eq!(derived("D&D 5e/x.epub", "A", &[]), ["d-d-5e=D&D 5e"]);
+        // An all-lowercase folder is title-cased.
+        assert_eq!(derived("french/x.epub", "A", &[]), ["french=French"]);
+    }
+
+    // Regression guard: a `Non-Fiction` folder must reuse the `nonfiction`
+    // slug already stored in existing catalogs. Slugifying the folder name
+    // would mint `non-fiction` beside it and split one browse entry into two
+    // identically-labelled halves.
+    #[test]
+    fn fiction_and_non_fiction_keep_their_historical_slugs() {
+        assert_eq!(derived("Fiction/x.epub", "A", &[]), ["fiction=Fiction"]);
+        for spelling in ["Non-Fiction", "non-fiction", "nonfiction", "Non Fiction"] {
+            assert_eq!(
+                derived(&format!("{spelling}/x.epub"), "A", &[]),
+                ["nonfiction=Non-Fiction"],
+                "folder {spelling:?}"
+            );
+        }
+        // And the same via a subject, which reaches the same canonicalizer.
+        assert_eq!(derived("x.epub", "A", &["Non Fiction"]), ["nonfiction=Non-Fiction"]);
+    }
+
+    #[test]
+    fn subjects_add_genres_on_top_of_the_folder() {
+        assert_eq!(
+            derived("fiction/Terry Pratchett/x.epub", "Terry Pratchett", &["Fantasy"]),
+            ["fiction=Fiction", "fantasy=Fantasy"]
+        );
+        // Unrecognized subjects contribute nothing; the folder still stands.
+        assert_eq!(
+            derived("fiction/x.epub", "A", &["Discworld", "New York Times bestseller"]),
+            ["fiction=Fiction"]
+        );
+    }
+
+    #[test]
+    fn a_folder_named_after_the_author_is_skipped() {
+        // `Books/<Author>/<title>.epub` would otherwise mint a category per
+        // author, duplicating the author browse feed.
+        assert_eq!(
+            derived("Terry Pratchett/x.epub", "Terry Pratchett", &["Fantasy"]),
+            ["fantasy=Fantasy"]
+        );
+        // Matching is on the slug, so punctuation and case don't defeat it.
+        assert_eq!(derived("terry-pratchett/x.epub", "Terry Pratchett", &[]).len(), 1);
+    }
+
+    #[test]
+    fn a_book_always_lands_in_at_least_one_category() {
+        // No folder, no recognized subject: the broad guess stands in so the
+        // book stays browsable.
+        assert_eq!(derived("x.epub", "A", &[]), ["nonfiction=Non-Fiction"]);
+        // The fallback still reads its old hints: "novel" means fiction, even
+        // though `normalize` does not recognize the phrase as a category.
+        assert_eq!(derived("x.epub", "A", &["A Novel"]), ["fiction=Fiction"]);
+        // A recognized subject means the fallback is not needed at all.
+        assert_eq!(derived("x.epub", "A", &["Fantasy"]), ["fantasy=Fantasy"]);
+    }
+
+    #[test]
+    fn duplicate_categories_collapse() {
+        // The folder and a subject naming the same thing yield one category.
+        assert_eq!(
+            derived("fiction/x.epub", "A", &["Fiction", "Fiction / Fantasy"]),
+            ["fiction=Fiction", "fantasy=Fantasy"]
+        );
     }
 }

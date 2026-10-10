@@ -132,9 +132,11 @@ groups that the 2.0 root feed inlines become navigation feeds of their own at
   metadata and `self` link).
 - Link objects with `rel`, `type`, `title`, `templated`, and `properties`.
 - Arbitrary, many-to-many categories (a `categories`/`book_categories` table
-  pair): scanning files them under a default category (library subfolder or
-  subject heuristic), and they can be assigned/removed at runtime via the
-  publication category endpoints. The facet, browse group, and
+  pair), assignable/removable at runtime via the publication category
+  endpoints. A newly-scanned book is filed under **every** category derived
+  from it: its top-level library subfolder (whatever it is called — `Cook
+  Books`, `Programming`, `D&D 5e`) plus any genre recognized in its own
+  `dc:subject` values. See [Deriving categories](#deriving-categories). The facet, browse group, and
   `/opds/category/{slug}` feed are all driven from the table.
 - A filesystem-backed catalog (`OPDS_LIBRARY_DIR`) that scans EPUB and XTC/XTCH
   files for metadata and covers and live-reloads on additions/removals, grouping
@@ -213,6 +215,52 @@ sqlx database create && sqlx migrate run   # one-time: create the dev database
 cargo sqlx prepare                         # refresh .sqlx/ — commit the result
 ```
 
+## Deriving categories
+
+A library's folder layout is usually its owner's taxonomy, so the top-level
+subfolder under `OPDS_LIBRARY_DIR` becomes a category as-is. A folder named
+after the book's own author is skipped, since the author browse feed already
+covers that. `Fiction` and `Non-Fiction` keep their canonical slugs however
+they are spelled, so one browse entry never splits into two
+identically-labelled halves.
+
+On top of that, each `dc:subject` in the book's own metadata is normalized by
+`src/subjects.rs` onto a small fixed set of genres (`Fantasy`,
+`Science Fiction`, `Mystery`, `Cooking`, `Programming`, ...). Subjects arrive
+as bare genres, BISAC paths (`COMPUTERS / Programming Languages / Python`), or
+comma-joined lists of them, so values are split on `,`, `/` and `;` and every
+resulting term is looked up. Matching is on whole terms, never substrings —
+`Science Fiction` must not be filed under `Science`.
+
+**Anything unrecognized is dropped rather than guessed.** Real subject lists
+are full of things that are true but useless to browse (`New York Times
+bestseller`, `Large type books`, `Rincewind the wizard (fictitious
+character)`), and filing books under wrong categories is worse than leaving
+them in the broad bucket their folder already gives them. Every book still
+lands in at least one category: with no usable folder and no recognized
+subject, a broad fiction/non-fiction guess stands in.
+
+To widen what is recognized, add entries to `SUBJECT_MAP` in
+`src/subjects.rs`.
+
+### Applying rule changes to an existing library
+
+Scanning skips files whose mtime is unchanged, and only seeds categories for
+books it creates, so changing the rules does not by itself reach a library
+that is already ingested. `recategorize` re-reads each book's file and applies
+them:
+
+```sh
+# add newly-derived categories; nothing is removed
+cargo run -- recategorize
+# also clear the blanket Fiction/Non-Fiction guess where a better one was found
+cargo run -- recategorize --prune
+```
+
+Hand-assigned categories are never touched. `--prune` only removes a blanket
+guess that the current rules no longer derive for that book, so a book that
+really does live in `Fiction/` keeps it.
+
 ## Management subcommands
 
 Besides `adduser`, the binary offers subcommands for editing the catalog
@@ -224,6 +272,7 @@ cargo run -- set-author <id> "New Author"
 cargo run -- add-category <id> "Science Fiction"   # created on demand
 cargo run -- remove-category <id> <category-slug>
 cargo run -- remove-book <id>
+cargo run -- recategorize [--prune]   # re-derive categories (needs the library dir)
 ```
 
 Note: for file-backed books, edits to title/author persist until the EPUB file
@@ -258,6 +307,8 @@ database lives in `/var/lib/minerva`.
 - `src/xtc.rs` — reads metadata out of XTC/XTCH files.
 - `migrations/` — SQL schema migrations (applied at startup).
 - `src/epub.rs` — reads metadata and cover images out of EPUB files.
+- `src/subjects.rs` — normalizes EPUB `dc:subject` values onto a small
+  browsable set of genres.
 - `src/covers.rs` — placeholder SVG covers and JPEG thumbnail generation.
 - `src/assets.rs` — EPUB generation (test/demo scaffolding; compiled for tests only).
 - `src/watch.rs` — watches the library directory and updates the catalog store.
