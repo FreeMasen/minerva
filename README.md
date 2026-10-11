@@ -267,6 +267,75 @@ Hand-assigned categories are never touched. `--prune` only removes a blanket
 guess that the current rules no longer derive for that book, so a book that
 really does live in `Fiction/` keeps it.
 
+## Identifying a book from its contents
+
+A book's OPF metadata is often thin or wrong — a Calibre conversion may name
+its author `HTML to Epub` or title a file `Book 34 - Thud!` — and in a real
+191-book library only 137 carried an ISBN there. But a published book's *text*
+usually carries its own identity: the copyright page prints ISBNs, and many
+books reproduce their Library of Congress Cataloging-in-Publication record
+verbatim, which is a catalog entry complete with subject headings and a
+classification number:
+
+```
+Names: Kim, Eric, author. | Huang, Jenny, photographer.
+Title: Korean American: food that tastes like home.
+Identifiers: LCCN 2021031286 (print) | ISBN 9780593233504 (ebook)
+Subjects: LCSH: Cooking, Korean.
+Classification: LCC TX724.5.K65 K5428 2022 | DDC 641.59519
+```
+
+`audit-contents` reads that and compares it to what the catalog stores:
+
+```sh
+# report only
+cargo run -- audit-contents
+# also record the ISBNs and LCCNs found
+cargo run -- audit-contents --save-identifiers
+# also file the book under the category its LC classification implies
+cargo run -- audit-contents --save-identifiers --save-categories
+```
+
+It reports, and changes nothing unless asked. A stored title or author that
+the book's own record contradicts is listed for a person to settle, never
+overwritten: the printed record is sometimes for a different edition, and the
+older unlabelled CIP layout sits among front matter (printer's run marks,
+designer credits) that can be misparsed.
+
+On that same 191-book library it found an ISBN in the text of 142 books — 19 of
+which had none in their metadata, taking ISBN coverage to 153 — plus 16 LCCNs
+and 44 CIP records, and corroborated 17 stored titles and 15 stored authors
+while flagging one genuine disagreement.
+
+### What it extracts, and how much to trust it
+
+- **ISBNs** are checksum-validated and normalized to ISBN-13, so the two
+  printings of one ISBN collapse and a coincidental run of digits cannot pass.
+  A copyright page commonly prints several (hardcover, ebook); all are kept as
+  candidates, since either may be the one an external catalog knows.
+- **LCCNs** are only taken from a labelled form (`LCCN 2021031286`,
+  `lccn.loc.gov/...`). This is the Library of Congress's own exact key, and
+  resolves against their catalog far more reliably than an ebook ISBN does.
+- **Titles and authors** are compared, not copied. An author is matched as a
+  set of name words, because a catalog record inverts names and appends dates
+  and roles (`O'Farrell, Maggie, 1972- author`); without that, nearly every
+  book would report a mismatch that is only a difference of form.
+- **The LC classification** maps onto a category exactly rather than by
+  guesswork, because unlike a subject string it is a controlled vocabulary.
+  `TX765` is `Cooking`, `QA76` is `Programming`, `PR`/`PS` are `Fiction`.
+  Classes with no clear everyday label yield nothing, as in
+  [Deriving categories](#deriving-categories).
+
+Identifiers live in a `book_identifiers` table, one row per
+(kind, value, source), so a disagreement between a book's metadata and its own
+printed record stays visible instead of one silently overwriting the other.
+
+Reading a book's text means decompressing all of it, which takes roughly 70ms
+per book — so this is an explicit pass, not part of scanning. A partial read
+will not do: scanning only the first and last few documents of each book found
+barely a third of the ISBNs a full pass did, because a copyright page is not
+reliably near either end.
+
 ## Series
 
 Series come from each book's own metadata, so browsing them needs nothing
@@ -303,6 +372,7 @@ cargo run -- remove-category <id> <category-slug>
 cargo run -- remove-book <id>
 cargo run -- recategorize [--prune]   # re-derive categories (needs the library dir)
 cargo run -- backfill-series          # fill in series from book files
+cargo run -- audit-contents [--save-identifiers] [--save-categories]
 ```
 
 Note: for file-backed books, edits to title/author persist until the EPUB file
@@ -339,6 +409,8 @@ database lives in `/var/lib/minerva`.
 - `src/epub.rs` — reads metadata and cover images out of EPUB files.
 - `src/subjects.rs` — normalizes EPUB `dc:subject` values onto a small
   browsable set of genres.
+- `src/identify.rs` — reads a book's identity out of its own text: ISBNs,
+  LCCNs, the Library of Congress CIP record, and the classification mapping.
 - `src/covers.rs` — placeholder SVG covers and JPEG thumbnail generation.
 - `src/assets.rs` — EPUB generation (test/demo scaffolding; compiled for tests only).
 - `src/watch.rs` — watches the library directory and updates the catalog store.

@@ -1453,6 +1453,7 @@ dependencies = [
  "notify-debouncer-full",
  "quick-xml",
  "rand_core",
+ "regex",
  "roxmltree",
  "serde",
  "serde_json",

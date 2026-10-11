@@ -1,3 +1,83 @@
+# Identifying a book from its contents — DONE
+
+"Can we detect the book from the contents?" Yes — and the useful part was not
+what I expected. A published book routinely prints its own catalog record.
+
+Measured on the real 191-book library:
+
+| signal | books |
+| --- | --- |
+| ISBN in the text | 142 |
+| ...where the OPF had none | 19 (coverage 137 -> 153, 80%) |
+| LCCN in the text | 16 |
+| CIP record reproduced | 44 |
+| ...yielding a usable LC classification | 16 |
+| stored titles corroborated | 17 |
+| stored authors corroborated | 15 |
+| genuine disagreements | 1 (`Book 34 - Thud!` vs `Thud!: a novel of Discworld`) |
+
+## Decisions worth keeping
+
+- **It is a verification source, not a correction source.** Of 15 comparable
+  authors in the prototype, 10 agreed outright and all 5 "disagreements" were
+  only the inverted library form (`Manzke, Margarita, 1974- author` vs
+  `Margarita Manzke`) — the stored form is the better display form. So authors
+  are compared as a *set of name words* and titles by containment either way
+  (a CIP title carries the full subtitle a catalog trims). Without that,
+  nearly every book reports a mismatch that is only a difference of form.
+- **Nothing is overwritten.** A disagreement is reported for a person to
+  settle. The printed record is sometimes a different edition, and the older
+  unlabelled CIP layout sits among front matter that misparses.
+- **Strict guards beat recall.** A Python prototype reported 8 title
+  mismatches of which 4 were its own false positives — it read a printer's run
+  mark (`11 12 13 14 15 DIX`) and a photographer credit as titles. The Rust
+  version guards every classic-layout field (inverted-name shape for authors,
+  a plausibility test for titles, roman-numeral entries ending the subject
+  list) and reports **1 mismatch, the genuine one** — while finding *more*
+  ISBNs (142 vs 136) and CIP blocks (44 vs 42) than the prototype did.
+- **ISBNs are checksum-validated and normalized to ISBN-13.** Validation is
+  what makes text scanning safe at all; normalization collapses a book that
+  prints both forms of its own ISBN.
+- **Only labelled LCCNs are accepted.** Bare eight-digit numbers are far too
+  common in running text.
+- **The LC classification maps exactly, not by guesswork**, because it is a
+  controlled vocabulary — the thing subject strings are not. Longest prefix
+  wins so `QA76` is Programming rather than the `QA` mathematics it sits
+  under. Classes with no clear everyday label yield nothing.
+- **One row per (kind, value, source)** in `book_identifiers`, not a column on
+  `books`: a copyright page prints several ISBNs and either may be the one an
+  external catalog knows, and keeping the source means an OPF/text
+  disagreement stays visible.
+- **An explicit pass, not part of scanning.** Reading a book's text
+  decompresses all of it — ~70ms per book, 13s for this library. Measured the
+  cheap alternative first: scanning only the first 6 and last 4 documents
+  found 51 ISBNs and 16 CIP blocks against a full pass's 136 and 42, because a
+  copyright page is not reliably near either end. So the full read it is, in a
+  command the owner runs deliberately.
+- **Tag stripping emits a newline for block-level tags.** The classic CIP
+  layout is read line by line, and a copyright page built from `<p>` elements
+  with no newlines between them collapses into one unparseable line
+  otherwise. Found by a test, not by the real library, whose markup happens to
+  carry newlines — a fixture that was *more* adversarial than real data.
+- Added `regex` (first new dep since quick-xml). The ISBN and CIP patterns are
+  exactly what it is for, and correctness here matters more than dep count.
+
+## Still not done
+
+- **Tier 1 external lookup.** The prerequisite is now met: 153 of 191 books
+  have an ISBN, and 16 have an LCCN — which matters disproportionately, since
+  LC's SRU matched only 27% of ebook ISBNs but an LCCN is its exact key.
+  `identifiers_for` is the read side, waiting for a consumer.
+- **The classic-layout recall is modest**: 17 titles and 15 authors out of 44
+  CIP blocks. That is deliberate — the guards reject rather than guess — but
+  there is room to parse more of that layout safely.
+- **20 books authored `HTML to Epub`** (all D&D titles) have no authoritative
+  record inside them, so no content parsing will help. They want a bulk author
+  set over the `D&D 5e` folder.
+- **`Browse by Author` is 79 entries** and some are one person split by name
+  format (`Terry Pratchett` / `Pratchett, Terry`). Author normalization is
+  both a browse improvement and the prerequisite for any title+author lookup.
+
 # Browse by Series — DONE
 
 The next lever on the 141-book `Fiction` pile, and it needed no external API:

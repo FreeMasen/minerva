@@ -294,6 +294,90 @@ fn guess_media_type(path: &str) -> String {
     }
     .to_string()
 }
+/// The book's readable text, for content-based identification.
+///
+/// Concatenates every (X)HTML document in the archive with its markup
+/// stripped and entities resolved, stopping once `cap` bytes have been
+/// collected. Reading the *whole* book matters: a copyright page is not
+/// reliably near either end — in a real library, scanning only the first and
+/// last few documents found barely a third of the ISBNs a full pass did.
+///
+/// This decompresses the entire book, so it is far more expensive than
+/// [`read_meta`] and belongs in an explicit pass rather than in scanning.
+pub fn read_text(path: &Path, cap: usize) -> io::Result<String> {
+    let mut zip = ZipArchive::new(File::open(path)?)?;
+    let names: Vec<String> = (0..zip.len())
+        .filter_map(|i| zip.by_index(i).ok().map(|f| f.name().to_string()))
+        .filter(|name| {
+            let lower = name.to_ascii_lowercase();
+            lower.ends_with(".xhtml") || lower.ends_with(".html") || lower.ends_with(".htm")
+        })
+        .collect();
+
+    let mut out = String::new();
+    for name in names {
+        if out.len() >= cap {
+            break;
+        }
+        let Ok(markup) = read_entry_string(&mut zip, &name) else {
+            continue;
+        };
+        strip_markup(&markup, &mut out);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// Tags that end a line of text. A copyright page is a stack of these, and
+/// the Cataloging-in-Publication record printed on it is read line by line —
+/// so collapsing them to spaces would run the whole record together and hide
+/// its structure.
+const BLOCK_TAGS: [&str; 22] = [
+    "p", "div", "br", "hr", "li", "ul", "ol", "dl", "dt", "dd", "h1", "h2", "h3", "h4", "h5", "h6",
+    "tr", "td", "th", "table", "section", "blockquote",
+];
+
+/// Append `markup` to `out` with tags removed and entities resolved.
+///
+/// A block-level tag becomes a newline and any other tag a space, so that the
+/// result keeps the document's line structure without letting words either
+/// side of an inline tag run together — either would hide an identifier from
+/// the patterns that look for one.
+fn strip_markup(markup: &str, out: &mut String) {
+    let mut text = String::with_capacity(markup.len());
+    let mut tag = String::new();
+    let mut in_tag = false;
+    for ch in markup.chars() {
+        match ch {
+            '<' => {
+                in_tag = true;
+                tag.clear();
+            }
+            '>' if in_tag => {
+                in_tag = false;
+                let name = tag
+                    .trim_start_matches('/')
+                    .split(|c: char| c.is_whitespace() || c == '/')
+                    .next()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                text.push(if BLOCK_TAGS.contains(&name.as_str()) {
+                    '\n'
+                } else {
+                    ' '
+                });
+            }
+            _ if in_tag => tag.push(ch),
+            _ => text.push(ch),
+        }
+    }
+    match quick_xml::escape::unescape(&text) {
+        Ok(unescaped) => out.push_str(&unescaped),
+        // Unresolvable entities are common in hand-built EPUBs; the raw text
+        // still carries the identifiers we are looking for.
+        Err(_) => out.push_str(&text),
+    }
+}
 
 #[cfg(test)]
 mod tests {

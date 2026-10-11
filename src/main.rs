@@ -22,6 +22,7 @@ mod catalog;
 mod covers;
 mod db;
 mod epub;
+mod identify;
 mod library;
 mod model;
 mod opds1;
@@ -122,6 +123,20 @@ enum Command {
     RemoveCategory { id: String, slug: String },
     /// Remove a book from the catalog.
     RemoveBook { id: String },
+    /// Compare each book's own text to what the catalog stores.
+    ///
+    /// Reads the ISBNs and Library of Congress Control Number printed in the
+    /// book, and the CIP catalog record it reproduces, then reports where the
+    /// stored title and author disagree with it. Reports only unless asked to
+    /// write: the printed record is sometimes for another edition.
+    AuditContents {
+        /// Record the ISBNs and LCCNs found.
+        #[arg(long)]
+        save_identifiers: bool,
+        /// Add the category implied by the Library of Congress classification.
+        #[arg(long)]
+        save_categories: bool,
+    },
     /// Fill in series metadata from each book's file, where none is recorded.
     ///
     /// Series parsing arrived after the schema, and scanning skips unchanged
@@ -216,6 +231,70 @@ async fn run_command(
                 println!("removed book '{id}'");
             } else {
                 anyhow::bail!("no such book: {id}");
+            }
+        }
+        Command::AuditContents {
+            save_identifiers,
+            save_categories,
+        } => {
+            let audit = store
+                .audit_contents(library::AuditOptions {
+                    save_identifiers,
+                    save_categories,
+                })
+                .await;
+
+            println!("read {} books", audit.books);
+            if audit.unreadable > 0 {
+                println!("  {} unreadable", audit.unreadable);
+            }
+            println!(
+                "  {:>4} with an ISBN in the text ({} of them had none in their metadata)",
+                audit.with_isbn, audit.isbn_rescued
+            );
+            println!("  {:>4} with an LCCN", audit.with_lccn);
+            println!(
+                "  {:>4} reproducing a Library of Congress CIP record",
+                audit.with_cip
+            );
+            println!(
+                "  {:>4} of those yielding a usable classification",
+                audit.with_classification
+            );
+            if save_identifiers {
+                println!("  {} identifiers recorded", audit.identifiers_added);
+            }
+            if save_categories {
+                println!("  {} categories added", audit.categories_added);
+            }
+
+            println!(
+                "\ncorroborated by the book's own record: {} titles, {} authors",
+                audit.title_agrees, audit.author_agrees
+            );
+            if audit.mismatches.is_empty() {
+                println!("no disagreements found");
+            } else {
+                println!("\n{} disagreement(s) to settle:", audit.mismatches.len());
+                for m in &audit.mismatches {
+                    println!("  {} [{}]", m.id, m.field);
+                    println!("      catalog: {}", m.stored);
+                    println!("      book   : {}", m.printed);
+                }
+                println!(
+                    "\nNothing was changed. Fix a title or author in the admin UI, or with\n\
+                     set-title / set-author."
+                );
+            }
+            if !audit.by_category.is_empty() {
+                let verb = if save_categories { "added" } else { "implied" };
+                println!("\ncategories {verb} by classification:");
+                for (label, count) in &audit.by_category {
+                    println!("  {count:>4}  {label}");
+                }
+                if !save_categories {
+                    println!("Re-run with --save-categories to apply these.");
+                }
             }
         }
         Command::BackfillSeries => {
@@ -2928,5 +3007,242 @@ mod tests {
         assert_eq!(report.already_set, 2);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // --- Content-based identification ---
+
+    /// Write a minimal EPUB whose body text contains `front_matter`, so the
+    /// content scanner has something real to read. Built by hand rather than
+    /// with `assets::epub_bytes`, which only emits metadata.
+    fn write_epub_with_text(
+        path: &std::path::Path,
+        title: &str,
+        author: &str,
+        opf_identifier: &str,
+        front_matter: &str,
+    ) {
+        use std::io::Write as _;
+        use zip::write::SimpleFileOptions;
+        use zip::{CompressionMethod, ZipWriter};
+
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        zip.start_file("mimetype", stored).unwrap();
+        zip.write_all(b"application/epub+zip").unwrap();
+
+        let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        zip.start_file("META-INF/container.xml", deflated).unwrap();
+        zip.write_all(
+            br#"<?xml version="1.0"?><container version="1.0"
+                 xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles>
+                 <rootfile full-path="content.opf"
+                 media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+        )
+        .unwrap();
+
+        zip.start_file("content.opf", deflated).unwrap();
+        zip.write_all(
+            format!(
+                r#"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id">
+ <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <dc:identifier id="pub-id">{opf_identifier}</dc:identifier>
+  <dc:title>{title}</dc:title>
+  <dc:creator>{author}</dc:creator>
+  <dc:language>en</dc:language>
+ </metadata>
+ <manifest><item id="c" href="copyright.xhtml" media-type="application/xhtml+xml"/></manifest>
+ <spine><itemref idref="c"/></spine>
+</package>"#
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+
+        // The copyright page, with the markup a real one carries so that tag
+        // stripping is exercised rather than bypassed.
+        zip.start_file("copyright.xhtml", deflated).unwrap();
+        let body: String = front_matter
+            .lines()
+            .map(|line| format!("<p>{}</p>", line.trim()))
+            .collect();
+        zip.write_all(
+            format!(
+                r#"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><body>{body}</body></html>"#
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        zip.finish().unwrap();
+    }
+
+    const CIP_FRONT_MATTER: &str = "\
+        Library of Congress Cataloging-in-Publication Data\n\
+        Beranbaum, Rose Levy.\n\
+        The Baking Bible / Rose Levy Beranbaum.\n\
+        pages cm\n\
+        ISBN 978-1-118-33861-2 (cloth); 978-0-544-18836-5 (ebook)\n\
+        Library of Congress Control Number: 2014016319\n\
+        1. Baking. I. Title.\n\
+        TX765.B466 2014\n\
+        641.81'5-dc23\n";
+
+    #[tokio::test]
+    async fn audit_reads_identifiers_and_classification_out_of_the_text() {
+        let dir = std::env::temp_dir().join(format!("opds-audit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_epub_with_text(
+            &dir.join("baking.epub"),
+            "The Baking Bible",
+            "Rose Levy Beranbaum",
+            // A UUID, like the majority of real EPUBs: no ISBN in the metadata.
+            "urn:uuid:5f0e8a1c-0000-4000-8000-000000000000",
+            CIP_FRONT_MATTER,
+        );
+
+        let store = CatalogStore::new(db::connect_memory().await.unwrap());
+        store.reconcile_dir(&dir).await;
+        let id = store.all().await.first().expect("a book").id.clone();
+
+        // Read-only by default.
+        let audit = store.audit_contents(library::AuditOptions::default()).await;
+        assert_eq!(audit.books, 1);
+        assert_eq!(audit.with_isbn, 1);
+        assert_eq!(audit.isbn_rescued, 1, "the ISBN exists only in the text");
+        assert_eq!(audit.with_lccn, 1);
+        assert_eq!(audit.with_cip, 1);
+        assert_eq!(audit.with_classification, 1);
+        // The printed record corroborates the catalog, so nothing to settle.
+        assert_eq!(audit.title_agrees, 1);
+        assert_eq!(audit.author_agrees, 1);
+        assert!(audit.mismatches.is_empty(), "{:?}", audit.mismatches);
+        // TX765 is home economics, so the classification implies Cooking.
+        assert_eq!(audit.by_category.get("Cooking"), Some(&1));
+        // Nothing was written.
+        assert!(store.identifiers_for(id.as_str()).await.is_empty());
+        assert_eq!(audit.identifiers_added, 0);
+
+        // Now with writing enabled.
+        let audit = store
+            .audit_contents(library::AuditOptions {
+                save_identifiers: true,
+                save_categories: true,
+            })
+            .await;
+        assert_eq!(audit.categories_added, 1);
+
+        let identifiers = store.identifiers_for(id.as_str()).await;
+        let isbns: Vec<&str> = identifiers
+            .iter()
+            .filter(|i| i.kind == library::IdentifierKind::Isbn)
+            .map(|i| i.value.as_str())
+            .collect();
+        // Both printings, each normalized to ISBN-13.
+        assert!(isbns.contains(&"9781118338612"), "{isbns:?}");
+        assert!(isbns.contains(&"9780544188365"), "{isbns:?}");
+        // Found in the text, not the metadata.
+        assert!(
+            identifiers
+                .iter()
+                .all(|i| i.source == library::IdentifierSource::Content)
+        );
+        let lccn = identifiers
+            .iter()
+            .find(|i| i.kind == library::IdentifierKind::Lccn)
+            .expect("an LCCN");
+        assert_eq!(lccn.value, "2014016319");
+
+        let categories: Vec<String> = store
+            .book_categories(id.as_str())
+            .await
+            .into_iter()
+            .map(|c| c.slug.0)
+            .collect();
+        assert!(categories.contains(&"cooking".to_string()), "{categories:?}");
+
+        // Re-running writes nothing further.
+        let audit = store
+            .audit_contents(library::AuditOptions {
+                save_identifiers: true,
+                save_categories: true,
+            })
+            .await;
+        assert_eq!(audit.identifiers_added, 0);
+        assert_eq!(audit.categories_added, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The case the audit exists for: the catalog's title is a conversion
+    // artifact and the book's own record says otherwise.
+    #[tokio::test]
+    async fn audit_reports_a_title_the_book_contradicts() {
+        let dir = std::env::temp_dir().join(format!("opds-audit-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_epub_with_text(
+            &dir.join("thud.epub"),
+            "Book 34 - Thud!",
+            "Terry Pratchett",
+            "urn:uuid:5f0e8a1c-0000-4000-8000-000000000001",
+            "Library of Congress Cataloging-in-Publication Data\n\
+             Pratchett, Terry.\n\
+             Thud! : a novel of Discworld / Terry Pratchett.\n\
+             1. Discworld (Imaginary place)-Fiction. I. Title.\n\
+             PR6066.R34 T48 2005\n",
+        );
+
+        let store = CatalogStore::new(db::connect_memory().await.unwrap());
+        store.reconcile_dir(&dir).await;
+
+        let audit = store.audit_contents(library::AuditOptions::default()).await;
+        // The author matches despite the inverted form; only the title differs.
+        assert_eq!(audit.author_agrees, 1);
+        assert_eq!(audit.mismatches.len(), 1, "{:?}", audit.mismatches);
+        let mismatch = &audit.mismatches[0];
+        assert_eq!(mismatch.field, "title");
+        assert_eq!(mismatch.stored, "Book 34 - Thud!");
+        assert!(mismatch.printed.starts_with("Thud!"), "{:?}", mismatch.printed);
+        // Reporting a disagreement must never change the catalog.
+        assert_eq!(store.all().await[0].title, "Book 34 - Thud!");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Front matter noise must not be mistaken for a catalog record.
+    #[tokio::test]
+    async fn audit_ignores_printers_marks_and_credits() {
+        let dir = std::env::temp_dir().join(format!("opds-audit-noise-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_epub_with_text(
+            &dir.join("noisy.epub"),
+            "Peril at End House",
+            "Agatha Christie",
+            "urn:uuid:5f0e8a1c-0000-4000-8000-000000000002",
+            "Library of Congress Cataloging-in-Publication Data\n\
+             11     12     13     14     15     DIX\n\
+             Original interior photography by Evan Sklar\n\
+             Printed in 9780000000000 copies\n",
+        );
+
+        let store = CatalogStore::new(db::connect_memory().await.unwrap());
+        store.reconcile_dir(&dir).await;
+
+        let audit = store.audit_contents(library::AuditOptions::default()).await;
+        assert!(
+            audit.mismatches.is_empty(),
+            "noise was read as metadata: {:?}",
+            audit.mismatches
+        );
+        assert_eq!(audit.title_agrees, 0);
+        assert_eq!(audit.author_agrees, 0);
+        // That digit run is not a valid ISBN, so it must not be recorded.
+        assert_eq!(audit.with_isbn, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
