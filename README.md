@@ -99,6 +99,7 @@ nothing version-specific about them.
 | `GET /opds/all?page=N`         | Paginated **acquisition** feed of all publications, with facets and pagination links. |
 | `GET /opds/category/{slug}`    | Acquisition feed for a category.                        |
 | `GET /opds/authors/{slug}`     | Acquisition feed for an author.                         |
+| `GET /opds/series/{slug}`      | Acquisition feed for a series, in reading order.         |
 | `GET /opds/publications/{id}`  | A single publication document.                          |
 | `GET /opds/publications/{id}/categories` | JSON list of a publication's categories.      |
 | `POST /opds/publications/{id}/categories` | Assign a category: `{"name": "Sci-Fi"}` (created on demand). |
@@ -116,6 +117,8 @@ nothing version-specific about them.
 | `GET /opds1/category/{slug}`      | **Acquisition**: one category.                       |
 | `GET /opds1/authors`              | **Navigation**: one entry per author, with counts.   |
 | `GET /opds1/authors/{slug}`       | **Acquisition**: one author.                         |
+| `GET /opds1/series`               | **Navigation**: one entry per series, with counts.   |
+| `GET /opds1/series/{slug}`        | **Acquisition**: one series, in reading order.       |
 | `GET /opds1/publications/{id}`    | A single "complete entry" document.                  |
 | `GET /opds1/search?query=...`     | **Acquisition**: search results (same filters as 2.0). |
 | `GET /opds1/opensearch.xml`       | The OpenSearch description document.                 |
@@ -150,7 +153,10 @@ groups that the 2.0 root feed inlines become navigation feeds of their own at
   (thumbnails are downscaled to fit 160x240 and re-encoded as JPEG) or as a
   generated SVG placeholder.
 - Series metadata (`belongsTo.series` with `name`/`position`), read from EPUB
-  Calibre or EPUB3 collection metadata and editable in the admin UI.
+  Calibre or EPUB3 collection metadata and editable in the admin UI, with a
+  **Browse by Series** group and per-series feeds. A series feed is ordered by
+  position rather than title — that being the point of browsing a series — and
+  a book with no recorded position sorts after the numbered ones.
 - A templated `search` link (`search{?query,author,title}`) and a search
   endpoint supporting a general query plus per-field author/title filters.
 - Pagination on the acquisition feed: `numberOfItems`/`itemsPerPage`/`currentPage`
@@ -261,6 +267,98 @@ Hand-assigned categories are never touched. `--prune` only removes a blanket
 guess that the current rules no longer derive for that book, so a book that
 really does live in `Fiction/` keeps it.
 
+## Identifying a book from its contents
+
+A book's OPF metadata is often thin or wrong — a Calibre conversion may name
+its author `HTML to Epub` or title a file `Book 34 - Thud!` — and in a real
+191-book library only 137 carried an ISBN there. But a published book's *text*
+usually carries its own identity: the copyright page prints ISBNs, and many
+books reproduce their Library of Congress Cataloging-in-Publication record
+verbatim, which is a catalog entry complete with subject headings and a
+classification number:
+
+```
+Names: Kim, Eric, author. | Huang, Jenny, photographer.
+Title: Korean American: food that tastes like home.
+Identifiers: LCCN 2021031286 (print) | ISBN 9780593233504 (ebook)
+Subjects: LCSH: Cooking, Korean.
+Classification: LCC TX724.5.K65 K5428 2022 | DDC 641.59519
+```
+
+`audit-contents` reads that and compares it to what the catalog stores:
+
+```sh
+# report only
+cargo run -- audit-contents
+# also record the ISBNs and LCCNs found
+cargo run -- audit-contents --save-identifiers
+# also file the book under the category its LC classification implies
+cargo run -- audit-contents --save-identifiers --save-categories
+```
+
+It reports, and changes nothing unless asked. A stored title or author that
+the book's own record contradicts is listed for a person to settle, never
+overwritten: the printed record is sometimes for a different edition, and the
+older unlabelled CIP layout sits among front matter (printer's run marks,
+designer credits) that can be misparsed.
+
+On that same 191-book library it found an ISBN in the text of 142 books — 19 of
+which had none in their metadata, taking ISBN coverage to 153 — plus 16 LCCNs
+and 44 CIP records, and corroborated 17 stored titles and 15 stored authors
+while flagging one genuine disagreement.
+
+### What it extracts, and how much to trust it
+
+- **ISBNs** are checksum-validated and normalized to ISBN-13, so the two
+  printings of one ISBN collapse and a coincidental run of digits cannot pass.
+  A copyright page commonly prints several (hardcover, ebook); all are kept as
+  candidates, since either may be the one an external catalog knows.
+- **LCCNs** are only taken from a labelled form (`LCCN 2021031286`,
+  `lccn.loc.gov/...`). This is the Library of Congress's own exact key, and
+  resolves against their catalog far more reliably than an ebook ISBN does.
+- **Titles and authors** are compared, not copied. An author is matched as a
+  set of name words, because a catalog record inverts names and appends dates
+  and roles (`O'Farrell, Maggie, 1972- author`); without that, nearly every
+  book would report a mismatch that is only a difference of form.
+- **The LC classification** maps onto a category exactly rather than by
+  guesswork, because unlike a subject string it is a controlled vocabulary.
+  `TX765` is `Cooking`, `QA76` is `Programming`, `PR`/`PS` are `Fiction`.
+  Classes with no clear everyday label yield nothing, as in
+  [Deriving categories](#deriving-categories).
+
+Identifiers live in a `book_identifiers` table, one row per
+(kind, value, source), so a disagreement between a book's metadata and its own
+printed record stays visible instead of one silently overwriting the other.
+
+Reading a book's text means decompressing all of it, which takes roughly 70ms
+per book — so this is an explicit pass, not part of scanning. A partial read
+will not do: scanning only the first and last few documents of each book found
+barely a third of the ISBNs a full pass did, because a copyright page is not
+reliably near either end.
+
+## Series
+
+Series come from each book's own metadata, so browsing them needs nothing
+external. Because series parsing arrived after the schema did, and scanning
+skips files whose mtime has not changed, a library ingested before then has
+the columns but no values — and so nothing to browse. `backfill-series` reads
+each book's file again and fills the gap:
+
+```sh
+cargo run -- backfill-series
+```
+
+Only books with no series recorded are touched, so a value edited in the admin
+UI is never clobbered, and re-running is a no-op. It needs no library
+directory: each book's file path is already stored.
+
+Series names are used exactly as the files spell them. A collection whose
+files disagree — `Discworld`, `Discworld Series` and `Discworld Novels` all
+appearing — browses as that many separate series; the admin UI's series field
+is the place to reconcile them, since guessing which names mean the same
+series is exactly the kind of silent wrong answer this project avoids
+elsewhere.
+
 ## Management subcommands
 
 Besides `adduser`, the binary offers subcommands for editing the catalog
@@ -273,6 +371,8 @@ cargo run -- add-category <id> "Science Fiction"   # created on demand
 cargo run -- remove-category <id> <category-slug>
 cargo run -- remove-book <id>
 cargo run -- recategorize [--prune]   # re-derive categories (needs the library dir)
+cargo run -- backfill-series          # fill in series from book files
+cargo run -- audit-contents [--save-identifiers] [--save-categories]
 ```
 
 Note: for file-backed books, edits to title/author persist until the EPUB file
@@ -309,6 +409,8 @@ database lives in `/var/lib/minerva`.
 - `src/epub.rs` — reads metadata and cover images out of EPUB files.
 - `src/subjects.rs` — normalizes EPUB `dc:subject` values onto a small
   browsable set of genres.
+- `src/identify.rs` — reads a book's identity out of its own text: ISBNs,
+  LCCNs, the Library of Congress CIP record, and the classification mapping.
 - `src/covers.rs` — placeholder SVG covers and JPEG thumbnail generation.
 - `src/assets.rs` — EPUB generation (test/demo scaffolding; compiled for tests only).
 - `src/watch.rs` — watches the library directory and updates the catalog store.

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT series AS \"series!\", COUNT(*) AS \"count!: i64\"\n               FROM books\n               WHERE series IS NOT NULL AND TRIM(series) <> ''\n               GROUP BY series ORDER BY series COLLATE NOCASE",
+  "describe": {
+    "columns": [
+      {
+        "name": "series!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "count!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "43fac20d67e9b975930655f308ff5d01ce3105fe2d789b7031090d5bc16e5c02"
+}

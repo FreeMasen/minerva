@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT kind AS \"kind!\", value AS \"value!\", source AS \"source!\"\n               FROM book_identifiers WHERE book_id = ?\n               ORDER BY kind, source, value",
+  "describe": {
+    "columns": [
+      {
+        "name": "kind!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "value!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "source!",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "406da41a4a4777d2e6ca4cf62042b4d48cbf4cccb322db8895b3bcb34395eee0"
+}

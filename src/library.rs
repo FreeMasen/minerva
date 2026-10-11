@@ -17,6 +17,7 @@ use sqlx::SqlitePool;
 use crate::catalog::{
     self, Acquisition, Book, BookFile, BookId, BookSource, Category, Format, UsdCents,
 };
+use crate::identify;
 use crate::epub::{CoverRef, EpubMeta};
 
 /// The `books` columns loaded into a [`BookRow`], in a fixed order.
@@ -82,6 +83,146 @@ impl BookRow {
 /// A SQLite-backed catalog of books.
 pub struct CatalogStore {
     pool: SqlitePool,
+}
+
+/// What an [`CatalogStore::audit_contents`] pass should write, if anything.
+/// Everything is off by default: an audit reports, and changing the catalog is
+/// opted into.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AuditOptions {
+    /// Record the ISBNs and LCCNs found.
+    pub save_identifiers: bool,
+    /// Add the category implied by the Library of Congress classification.
+    pub save_categories: bool,
+}
+
+/// A place where the catalog disagrees with the record printed in the book.
+#[derive(Debug, Clone)]
+pub struct Mismatch {
+    pub id: String,
+    pub field: &'static str,
+    pub stored: String,
+    pub printed: String,
+}
+
+/// What an [`CatalogStore::audit_contents`] pass found.
+#[derive(Debug, Default)]
+pub struct ContentAudit {
+    /// Books whose text was read.
+    pub books: u64,
+    /// Books whose file could not be read.
+    pub unreadable: u64,
+    /// Books with at least one ISBN printed in their text.
+    pub with_isbn: u64,
+    /// Books whose ISBN was found only in the text — the OPF had none.
+    pub isbn_rescued: u64,
+    /// Books with a Library of Congress Control Number in their text.
+    pub with_lccn: u64,
+    /// Books reproducing a CIP record.
+    pub with_cip: u64,
+    /// Books whose CIP record yielded a usable classification.
+    pub with_classification: u64,
+    /// Identifier rows written.
+    pub identifiers_added: u64,
+    /// Category assignments written.
+    pub categories_added: u64,
+    /// Stored titles the printed record corroborates.
+    pub title_agrees: u64,
+    /// Stored authors the printed record corroborates.
+    pub author_agrees: u64,
+    /// Categories the classification implied, and how many books each.
+    pub by_category: std::collections::BTreeMap<String, u64>,
+    /// Everywhere the catalog and the printed record disagree.
+    pub mismatches: Vec<Mismatch>,
+}
+
+/// An identifier recorded for a book.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Identifier {
+    pub kind: IdentifierKind,
+    pub value: String,
+    pub source: IdentifierSource,
+}
+
+/// Which identifier scheme a value belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentifierKind {
+    /// Normalized to ISBN-13, so the two printings of one ISBN collapse.
+    Isbn,
+    /// A Library of Congress Control Number.
+    Lccn,
+}
+
+/// Where an identifier was found, kept so a disagreement between a book's
+/// metadata and its own printed record stays visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentifierSource {
+    /// The OPF `dc:identifier`.
+    Opf,
+    /// Printed in the book's text.
+    Content,
+    /// Listed in the book's Library of Congress CIP record. Part of the
+    /// modelled vocabulary: a CIP block is itself part of the book's text, so
+    /// the content scan already covers it.
+    #[allow(dead_code)]
+    Cip,
+}
+
+impl IdentifierKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IdentifierKind::Isbn => "isbn",
+            IdentifierKind::Lccn => "lccn",
+        }
+    }
+
+    #[allow(dead_code)] // paired with `identifiers_for`
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "isbn" => Some(IdentifierKind::Isbn),
+            "lccn" => Some(IdentifierKind::Lccn),
+            other => {
+                tracing::warn!(other, "unknown identifier kind in the database");
+                None
+            }
+        }
+    }
+}
+
+impl IdentifierSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IdentifierSource::Opf => "opf",
+            IdentifierSource::Content => "content",
+            IdentifierSource::Cip => "cip",
+        }
+    }
+
+    #[allow(dead_code)] // paired with `identifiers_for`
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "opf" => Some(IdentifierSource::Opf),
+            "content" => Some(IdentifierSource::Content),
+            "cip" => Some(IdentifierSource::Cip),
+            other => {
+                tracing::warn!(other, "unknown identifier source in the database");
+                None
+            }
+        }
+    }
+}
+
+/// What a [`CatalogStore::backfill_series`] pass changed.
+#[derive(Debug, Default)]
+pub struct SeriesBackfill {
+    /// Books given a series from their file.
+    pub filled: u64,
+    /// Books left alone because they already had one.
+    pub already_set: u64,
+    /// Books whose file could not be read.
+    pub unreadable: u64,
+    /// How many books each series gained.
+    pub by_series: std::collections::BTreeMap<String, u64>,
 }
 
 /// What a [`CatalogStore::recategorize`] pass changed.
@@ -399,6 +540,313 @@ impl CatalogStore {
                 .collect()
         })
         .unwrap_or_default()
+    }
+
+    /// Fill in series metadata from each book's own file, for books that have
+    /// none recorded.
+    ///
+    /// Series parsing arrived after the schema did, and scanning skips files
+    /// whose mtime has not changed, so a library ingested before then has the
+    /// columns but no values — and nothing to browse. This reads each book's
+    /// file again and fills the gap.
+    ///
+    /// Only books with no series recorded are touched, so a value edited in
+    /// the admin UI is never clobbered. Needs no library directory: each
+    /// book's file path is already stored.
+    pub async fn backfill_series(&self) -> SeriesBackfill {
+        let mut report = SeriesBackfill::default();
+
+        for book in self.all().await {
+            if book.series.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+                report.already_set += 1;
+                continue;
+            }
+            let BookSource::Files(files) = &book.source else {
+                continue;
+            };
+            let Some(file) = files.first() else {
+                continue;
+            };
+            let meta = match file.format.read_meta(&file.path) {
+                Ok(meta) => meta,
+                Err(err) => {
+                    tracing::warn!(?err, path = %file.path.display(), "cannot re-read book file");
+                    report.unreadable += 1;
+                    continue;
+                }
+            };
+            let Some(series) = meta.series.as_deref().map(str::trim).filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+
+            match self
+                .set_series(book.id.as_str(), Some(series), meta.series_index)
+                .await
+            {
+                Ok(true) => {
+                    report.filled += 1;
+                    *report.by_series.entry(series.to_string()).or_default() += 1;
+                }
+                Ok(false) => {}
+                Err(err) => tracing::error!(?err, id = %book.id, "failed to set series"),
+            }
+        }
+        report
+    }
+
+    /// Read every book's own text and compare what it says about itself to
+    /// what the catalog stores.
+    ///
+    /// This decompresses each book in full (see [`crate::epub::read_text`] for
+    /// why a partial read will not do), so it is an explicit pass rather than
+    /// part of scanning. It never overwrites stored metadata: a disagreement
+    /// is reported for a person to settle, because the record printed in a
+    /// book is sometimes for a different edition and the older CIP layout can
+    /// misparse.
+    pub async fn audit_contents(&self, options: AuditOptions) -> ContentAudit {
+        /// Enough of a book to reach its copyright page and its CIP record,
+        /// without holding a whole large book in memory.
+        const TEXT_CAP: usize = 4 * 1024 * 1024;
+
+        let mut audit = ContentAudit::default();
+
+        for book in self.all().await {
+            let BookSource::Files(files) = &book.source else {
+                continue;
+            };
+            let Some(file) = files.first() else {
+                continue;
+            };
+
+            let text = match crate::epub::read_text(&file.path, TEXT_CAP) {
+                Ok(text) => text,
+                Err(err) => {
+                    tracing::warn!(?err, path = %file.path.display(), "cannot read book text");
+                    audit.unreadable += 1;
+                    continue;
+                }
+            };
+            audit.books += 1;
+
+            let evidence = identify::from_text(&text);
+            // The OPF identifier is cheap and worth recording alongside, so a
+            // disagreement between it and the text stays visible.
+            let opf_isbn = file
+                .format
+                .read_meta(&file.path)
+                .ok()
+                .and_then(|meta| meta.identifier)
+                .and_then(|id| identify::canonical_isbn(&id));
+
+            let mut identifiers = Vec::new();
+            if let Some(isbn) = &opf_isbn {
+                identifiers.push(Identifier {
+                    kind: IdentifierKind::Isbn,
+                    value: isbn.clone(),
+                    source: IdentifierSource::Opf,
+                });
+            }
+            for isbn in &evidence.isbns {
+                identifiers.push(Identifier {
+                    kind: IdentifierKind::Isbn,
+                    value: isbn.clone(),
+                    source: IdentifierSource::Content,
+                });
+            }
+            if let Some(lccn) = &evidence.lccn {
+                identifiers.push(Identifier {
+                    kind: IdentifierKind::Lccn,
+                    value: lccn.clone(),
+                    source: IdentifierSource::Content,
+                });
+            }
+
+            if !evidence.isbns.is_empty() {
+                audit.with_isbn += 1;
+                if opf_isbn.is_none() {
+                    audit.isbn_rescued += 1;
+                }
+            }
+            if evidence.lccn.is_some() {
+                audit.with_lccn += 1;
+            }
+
+            if options.save_identifiers && !identifiers.is_empty() {
+                match self.add_identifiers(book.id.as_str(), &identifiers).await {
+                    Ok(added) => audit.identifiers_added += added,
+                    Err(err) => tracing::error!(?err, id = %book.id, "failed to save identifiers"),
+                }
+            }
+
+            let Some(cip) = &evidence.cip else {
+                continue;
+            };
+            audit.with_cip += 1;
+
+            if let Some(printed) = &cip.title {
+                if identify::titles_agree(&book.title, printed) {
+                    audit.title_agrees += 1;
+                } else {
+                    audit.mismatches.push(Mismatch {
+                        id: book.id.to_string(),
+                        field: "title",
+                        stored: book.title.clone(),
+                        printed: printed.clone(),
+                    });
+                }
+            }
+            if let Some(printed) = &cip.author {
+                if identify::authors_agree(&book.author, printed) {
+                    audit.author_agrees += 1;
+                } else {
+                    audit.mismatches.push(Mismatch {
+                        id: book.id.to_string(),
+                        field: "author",
+                        stored: book.author.clone(),
+                        printed: printed.clone(),
+                    });
+                }
+            }
+
+            // The classification is a controlled vocabulary, so unlike a
+            // subject string it maps onto a category exactly.
+            if let Some(label) = cip.lcc.as_deref().and_then(identify::lcc_category) {
+                audit.with_classification += 1;
+                *audit.by_category.entry(label.to_string()).or_default() += 1;
+                if options.save_categories {
+                    let category = catalog::canonical_category(label);
+                    // `seed_category` ignores a duplicate, so the count has to
+                    // come from checking first — otherwise a repeated audit
+                    // reports assignments it did not make.
+                    let already = self
+                        .book_categories(book.id.as_str())
+                        .await
+                        .iter()
+                        .any(|c| c.slug == category.slug);
+                    if !already {
+                        match self.seed_category(book.id.as_str(), &category).await {
+                            Ok(()) => audit.categories_added += 1,
+                            Err(err) => {
+                                tracing::error!(?err, id = %book.id, "failed to seed category")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        audit
+    }
+
+    /// Record identifiers for a book. Existing rows are left alone, so a
+    /// repeated pass is a no-op and nothing is ever overwritten.
+    pub async fn add_identifiers(
+        &self,
+        book_id: &str,
+        identifiers: &[Identifier],
+    ) -> Result<u64, sqlx::Error> {
+        let mut added = 0;
+        for identifier in identifiers {
+            let kind = identifier.kind.as_str();
+            let source = identifier.source.as_str();
+            let result = sqlx::query!(
+                "INSERT OR IGNORE INTO book_identifiers (book_id, kind, value, source)
+                 VALUES (?, ?, ?, ?)",
+                book_id,
+                kind,
+                identifier.value,
+                source
+            )
+            .execute(&self.pool)
+            .await?;
+            added += result.rows_affected();
+        }
+        Ok(added)
+    }
+
+    /// Every identifier recorded for a book.
+    ///
+    /// The read side of the identifier store: nothing in the server consumes
+    /// it yet, since its purpose is looking a book up in an external catalog.
+    #[allow(dead_code)]
+    pub async fn identifiers_for(&self, book_id: &str) -> Vec<Identifier> {
+        sqlx::query!(
+            r#"SELECT kind AS "kind!", value AS "value!", source AS "source!"
+               FROM book_identifiers WHERE book_id = ?
+               ORDER BY kind, source, value"#,
+            book_id
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|r| {
+            Some(Identifier {
+                kind: IdentifierKind::from_str(&r.kind)?,
+                value: r.value,
+                source: IdentifierSource::from_str(&r.source)?,
+            })
+        })
+        .collect()
+    }
+
+    /// Every series in the catalog with its book count, ordered by name.
+    ///
+    /// Shaped like [`Self::authors`] — a `Category` of slug + label — so the
+    /// same browse-group and navigation-feed builders serve all three axes.
+    pub async fn series(&self) -> Vec<(Category, u64)> {
+        sqlx::query!(
+            r#"SELECT series AS "series!", COUNT(*) AS "count!: i64"
+               FROM books
+               WHERE series IS NOT NULL AND TRIM(series) <> ''
+               GROUP BY series ORDER BY series COLLATE NOCASE"#
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(|r| {
+                    (
+                        Category::new(catalog::slugify(&r.series), r.series),
+                        r.count as u64,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// The series name matching a slug, if any.
+    pub async fn series_by_slug(&self, slug: &str) -> Option<String> {
+        sqlx::query_scalar!(
+            r#"SELECT DISTINCT series AS "series!"
+               FROM books WHERE series IS NOT NULL AND TRIM(series) <> ''"#
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|series| catalog::slugify(series) == slug)
+    }
+
+    /// All books in a series, in reading order.
+    ///
+    /// Ordered by position within the series rather than by title — that is
+    /// the whole point of browsing a series. A book with no recorded position
+    /// sorts after the numbered ones.
+    pub async fn books_in_series(&self, series: &str) -> Vec<Book> {
+        let rows = sqlx::query_as!(
+            BookRow,
+            "SELECT id, title, author, language, description, modified,
+                    series, series_index, price_cents, lendable, cover_zip_path, cover_media_type
+             FROM books WHERE series = ?
+             ORDER BY series_index IS NULL, series_index, title COLLATE NOCASE",
+            series
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        self.hydrate(rows).await
     }
 
     /// The author name matching a slug, if any.
